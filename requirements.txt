@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+firebase-admin
+python-multipart
+email-validator
+bcrypt
+pydantic[email]
+sendgrid
+sqlalchemy
+databases
