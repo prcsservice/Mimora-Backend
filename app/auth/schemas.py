@@ -22,6 +22,16 @@ class VerifyOTPRequest(BaseModel):
     otp: str
 
 
+class CheckUserRequest(BaseModel):
+    identifier: str  # email or phone number
+    type: str  # "email" or "phone"
+
+
+class CheckUserResponse(BaseModel):
+    exists: bool
+    user_type: str | None = None
+
+
 class UserResponse(BaseModel):
     id: UUID
     firebase_uid: str            # ✅ ADD THIS
