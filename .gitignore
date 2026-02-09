@@ -7,6 +7,8 @@ app/auth/.env
 # Deployment scripts with secrets
 app/auth/deploy.sh
 **/deploy.sh
+show_tables.sh
+cloud_sql_proxy
 
 serviceAccountKey.json
 **/serviceAccountKey.json
