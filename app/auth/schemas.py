@@ -32,6 +32,10 @@ class CheckUserResponse(BaseModel):
     user_type: str | None = None
 
 
+class EmailLoginRequest(BaseModel):
+    email: EmailStr
+
+
 class UserResponse(BaseModel):
     id: UUID
     firebase_uid: str            # ✅ ADD THIS
