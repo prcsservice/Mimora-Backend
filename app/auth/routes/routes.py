@@ -9,7 +9,7 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
 from app.auth.firebase import verify_firebase_token
-from app.auth.schemas import EmailSignupRequest, OTPRequest, VerifyOTPRequest, UserResponse
+from app.auth.schemas import EmailSignupRequest, OTPRequest, VerifyOTPRequest, UserResponse, CheckUserRequest
 from app.auth.models import User, EmailOTP
 from app.auth.database import get_db
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
@@ -24,6 +24,30 @@ router = APIRouter()
 @router.get("/auth/customer/me")
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.post("/auth/customer/check")
+async def check_user_exists(
+    payload: CheckUserRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Check if a user exists without creating or modifying anything.
+    Used by frontend to distinguish login vs signup flows.
+    """
+    from app.auth.schemas import CheckUserResponse
+    
+    if payload.type == "email":
+        user = db.query(User).filter(User.email == payload.identifier).first()
+    elif payload.type == "phone":
+        user = db.query(User).filter(User.phone_number == payload.identifier).first()
+    else:
+        raise HTTPException(status_code=400, detail="Invalid type. Use 'email' or 'phone'")
+    
+    return CheckUserResponse(
+        exists=user is not None,
+        user_type="customer" if user else None
+    )
 
 
 @router.post("/auth/customer/oauth", response_model=UserResponse)
