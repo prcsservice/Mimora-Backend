@@ -15,6 +15,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
+from geoalchemy2 import Geography
 from app.auth.database import Base
 
 
@@ -27,6 +28,13 @@ class User(Base):
     name = Column(String, index=True)
     email = Column(String, unique=True, index=True, nullable=True)
     phone_number = Column(String, unique=True, index=True, nullable=True)
+
+    city = Column(String, nullable=True)
+    address = Column(String, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    travel_radius = Column(Integer, default=10)  # in kilometers
+    location = Column(Geography(geometry_type="POINT", srid=4326))
 
     provider = Column(String)  # google | phone | email
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -69,6 +77,7 @@ class Artist(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     travel_radius = Column(Integer, default=10)  # in kilometers
+    location = Column(Geography(geometry_type="POINT", srid=4326))
 
     # KYC Verification Status
     kyc_verified = Column(Boolean, default=False, index=True)
@@ -113,9 +122,14 @@ class KYCRequest(Base):
     provider = Column(String, default="meon", nullable=False)  # "meon"
     provider_kyc_id = Column(String, nullable=True, index=True)  # Meon's KYC ID
     
+    # Two-step Verification Tracking
+    document_verified = Column(Boolean, default=False)  # Aadhar/PAN verification
+    face_verified = Column(Boolean, default=False)  # Face/Liveness verification
+    current_step = Column(String, default="document", nullable=False)  # "document" | "face" | "complete"
+    
     # Status Tracking
     status = Column(String, default="pending", nullable=False)  
-    # Possible values: "pending", "in_progress", "verified", "failed", "cancelled"
+    # Possible values: "pending", "in_progress", "document_verified", "verified", "failed", "cancelled"
     
     # Store full verification response from Meon
     verification_data = Column(Text, nullable=True)  # JSON string

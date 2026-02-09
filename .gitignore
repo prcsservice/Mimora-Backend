@@ -4,6 +4,10 @@
 .env.*.local
 app/auth/.env
 
+# Deployment scripts with secrets
+app/auth/deploy.sh
+**/deploy.sh
+
 serviceAccountKey.json
 **/serviceAccountKey.json
 

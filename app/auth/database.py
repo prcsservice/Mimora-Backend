@@ -1,9 +1,13 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+import os
+from dotenv import load_dotenv
 
-# PostgreSQL connection URL
-DATABASE_URL = "postgresql://badassuser:password@localhost:5432/badassdb"
+# Load environment variables
+load_dotenv()
 
+# PostgreSQL connection URL from environment
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/db")
 
 # Create engine
 engine = create_engine(DATABASE_URL)

@@ -4,6 +4,8 @@ from uuid import UUID
 from proto import Field
 from pydantic import BaseModel, EmailStr,Field
 from datetime import datetime
+from geoalchemy2 import Geography
+from typing import Tuple
 
 
 class OTPRequest(BaseModel):
@@ -26,6 +28,7 @@ class UserResponse(BaseModel):
     email: EmailStr
     name: str | None
     provider: str
+    token: str | None = None  # ✅ Optional token for auth flows
     created_at: datetime
 
     class Config:
@@ -47,6 +50,7 @@ class ArtistCreate(BaseModel):
     travel_radius: float = Field(..., alias="travel_radius")
     latitude: float
     longitude: float
+    location: Tuple[float, float]
     kyc_verified: bool
     bank_verified: bool
     portfolio: List[str]

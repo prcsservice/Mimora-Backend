@@ -1,0 +1,2 @@
+psql -U badassuser -d badassdb -W
+uvicorn app.auth.main:app --reload

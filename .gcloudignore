@@ -1,0 +1,26 @@
+# .gcloudignore references the .dockerignore for base patterns
+# But we explicitly want to match what .dockerignore has.
+# NOTE: Cloud Build uses this to determine what to upload.
+
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+.env.local
+.idea/
+.vscode/
+*.swp
+*.swo
+test_*.py
+*_test.py
+*.log
+.DS_Store
+
+# Explicitly Allow serviceAccountKey.json even if gitignored
+!serviceAccountKey.json

@@ -4,8 +4,8 @@ from sendgrid.helpers.mail import Mail
 import os
 from dotenv import load_dotenv
 
-# Load .env
-load_dotenv(dotenv_path="app/auth/.env")
+# Load .env from root directory (auto-discovers .env file)
+load_dotenv()
 
 
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
