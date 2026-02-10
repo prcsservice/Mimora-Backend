@@ -10,6 +10,13 @@ from typing import Tuple
 
 class OTPRequest(BaseModel):
     name: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+class OAuthRequest(BaseModel):
+    latitude: float | None = None
+    longitude: float | None = None
 
 
 class EmailSignupRequest(BaseModel):
@@ -34,11 +41,14 @@ class CheckUserResponse(BaseModel):
 
 class UserResponse(BaseModel):
     id: UUID
-    firebase_uid: str            # ✅ ADD THIS
-    email: EmailStr
+    firebase_uid: str
+    email: EmailStr | None = None    # Optional for phone-only users
+    phone_number: str | None = None  # Phone number
     name: str | None
     provider: str
-    token: str | None = None  # ✅ Optional token for auth flows
+    token: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     created_at: datetime
 
     class Config:

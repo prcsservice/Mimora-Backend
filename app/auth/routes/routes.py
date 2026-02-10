@@ -9,7 +9,7 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
 from app.auth.firebase import verify_firebase_token
-from app.auth.schemas import EmailSignupRequest, OTPRequest, VerifyOTPRequest, UserResponse, CheckUserRequest
+from app.auth.schemas import EmailSignupRequest, OTPRequest, OAuthRequest, VerifyOTPRequest, UserResponse, CheckUserRequest
 from app.auth.models import User, EmailOTP
 from app.auth.database import get_db
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
@@ -54,6 +54,7 @@ async def check_user_exists(
 @limiter.limit("20/minute")  # Rate limit for OAuth login
 async def oauth_login(
     request: Request,
+    payload: OAuthRequest = OAuthRequest(),
     authorization: str = Header(...),
     db: Session = Depends(get_db)
 ):
@@ -124,7 +125,9 @@ async def oauth_login(
             firebase_uid=firebase_uid,
             email=email,
             name=name,
-            provider=provider
+            provider=provider,
+            latitude=payload.latitude,
+            longitude=payload.longitude
         )
         db.add(user)
         db.commit()
@@ -368,7 +371,9 @@ async def otp_auth(
             firebase_uid=firebase_uid,
             name=payload.name,
             phone_number=phone_number,
-            provider=provider
+            provider=provider,
+            latitude=payload.latitude,
+            longitude=payload.longitude
         )
         db.add(user)
         db.commit()
