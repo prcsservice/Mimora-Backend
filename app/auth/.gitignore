@@ -1,2 +1,4 @@
 serviceAccountKey.json
 __pycache__/
+app/auth/deploy.sh
+**/deploy.s

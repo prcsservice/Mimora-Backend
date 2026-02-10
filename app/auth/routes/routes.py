@@ -9,7 +9,7 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
 from app.auth.firebase import verify_firebase_token
-from app.auth.schemas import EmailSignupRequest, OTPRequest, OAuthRequest, VerifyOTPRequest, UserResponse, CheckUserRequest
+from app.auth.schemas import EmailSignupRequest, OAuthRequest, OTPRequest, VerifyOTPRequest, UserResponse, CheckUserRequest,EmailLoginRequest
 from app.auth.models import User, EmailOTP
 from app.auth.database import get_db
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
@@ -195,6 +195,18 @@ async def email_signup(
     payload: EmailSignupRequest,
     db: Session = Depends(get_db)
 ):
+
+    # Delete expired OTPs for this email
+    expired_otps = db.query(EmailOTP).filter(
+        EmailOTP.email == payload.email,
+        EmailOTP.expires_at < datetime.utcnow()
+    ).all()
+    
+    if expired_otps:
+        for expired_otp in expired_otps:
+            db.delete(expired_otp)
+        db.commit()
+        print(f"Deleted {len(expired_otps)} expired OTP(s) for {payload.email}")
     # 1️⃣ Generate OTP
     otp = generate_otp()
 
@@ -212,9 +224,55 @@ async def email_signup(
     # 3️⃣ Send OTP email
     send_otp_email(payload.email, otp)
 
-    return {"message": "OTP sent to email"}
 
 
+@router.post("/auth/customer/email/login")
+@limiter.limit("5/minute")
+async def email_login(
+    request: Request,
+    payload: EmailLoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    LOGIN: Send OTP to email (email only, no username needed)
+    
+    Request: {"email": "user@example.com"}
+    Response: {"message": "OTP sent to your email", "email": "user@example.com"}
+    """
+    # Check if user exists
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Email not registered. Please signup first.")
+        # Delete expired OTPs for this email
+    expired_otps = db.query(EmailOTP).filter(
+        EmailOTP.email == payload.email,
+        EmailOTP.expires_at < datetime.utcnow()
+    ).all()
+    
+    if expired_otps:
+        for expired_otp in expired_otps:
+            db.delete(expired_otp)
+        db.commit()
+        print(f"Deleted {len(expired_otps)} expired OTP(s) for {payload.email}")
+    # 1️⃣ Generate OTP
+    otp = generate_otp()
+    # Generate OTP
+    otp = generate_otp()
+    
+    # Store OTP with existing username
+    otp_entry = EmailOTP(
+        email=payload.email,
+        username=user.name,
+        otp_hash=hash_otp(otp),
+        expires_at=otp_expiry()
+    )
+    db.add(otp_entry)
+    db.commit()
+    
+    # Send OTP email
+    send_otp_email(payload.email, otp)
+    
+    return {"message": "OTP sent to your email", "email": payload.email}
 
 
 @router.post("/auth/customer/email/verify", response_model=UserResponse)
@@ -249,11 +307,15 @@ async def verify_email_otp(
     # 4️⃣ Get the username from OTP record
     username = otp_record.username
 
-    # 5️⃣ Check if user already exists
+    # 5️⃣ Delete the used OTP
+    db.delete(otp_record)
+    db.commit()
+
+    # 6️⃣ Check if user already exists
     user = db.query(User).filter(User.email == payload.email).first()
 
     if not user:
-        # 6️⃣ Create user in Firebase
+        # 7️⃣ Create user in Firebase
         try:
             firebase_user = firebase_auth.create_user(
                 email=payload.email,
@@ -262,7 +324,7 @@ async def verify_email_otp(
         except firebase_auth.EmailAlreadyExistsError:
             firebase_user = firebase_auth.get_user_by_email(payload.email)
 
-        # 7️⃣ Create user in DB
+        # 8️⃣ Create user in DB
         user = User(
             email=payload.email,
             name=username,
@@ -275,7 +337,7 @@ async def verify_email_otp(
         db.commit()
         db.refresh(user)
 
-    # 8️⃣ Generate Firebase Custom Token
+    # 9️⃣ Generate Firebase Custom Token
     try:
         custom_token = firebase_auth.create_custom_token(user.firebase_uid)
         if isinstance(custom_token, bytes):
