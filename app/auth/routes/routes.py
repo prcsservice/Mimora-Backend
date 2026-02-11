@@ -9,7 +9,7 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
 from app.auth.firebase import verify_firebase_token
-from app.auth.schemas import EmailSignupRequest, OAuthRequest, OTPRequest, VerifyOTPRequest, UserResponse, CheckUserRequest,EmailLoginRequest
+from app.auth.schemas import EmailSignupRequest, OAuthRequest, OTPRequest, VerifyOTPRequest, UserResponse, CheckUserRequest, EmailLoginRequest, UserLocationUpdate
 from app.auth.models import User, EmailOTP
 from app.auth.database import get_db
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
@@ -24,6 +24,29 @@ router = APIRouter()
 @router.get("/auth/customer/me")
 async def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.put("/auth/customer/location", response_model=UserResponse)
+async def update_location(
+    payload: UserLocationUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update authenticated user's location
+    """
+    current_user.latitude = payload.latitude
+    current_user.longitude = payload.longitude
+    
+    # Update PostGIS geometry column
+    # Point(longitude latitude)
+    current_user.location = f"POINT({payload.longitude} {payload.latitude})"
+    
+    db.commit()
+    db.refresh(current_user)
+    
+    return current_user
+
 
 
 @router.post("/auth/customer/check")
@@ -226,6 +249,7 @@ async def email_signup(
 
 
 
+
 @router.post("/auth/customer/email/login")
 @limiter.limit("5/minute")
 async def email_login(
@@ -270,6 +294,7 @@ async def email_login(
     db.commit()
     
     # Send OTP email
+    print(f"DEBUG OTP: {otp}")
     send_otp_email(payload.email, otp)
     
     return {"message": "OTP sent to your email", "email": payload.email}

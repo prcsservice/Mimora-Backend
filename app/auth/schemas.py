@@ -14,9 +14,16 @@ class OTPRequest(BaseModel):
     longitude: float | None = None
 
 
+
 class OAuthRequest(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
+
+
+class UserLocationUpdate(BaseModel):
+    latitude: float
+    longitude: float
+
 
 
 class EmailSignupRequest(BaseModel):
