@@ -15,7 +15,7 @@ import json
 
 from app.auth.database import get_db
 from app.auth.models import Artist, KYCRequest
-from app.auth.schemas import ArtistCreate, ArtistResponse
+from app.auth.schemas import ArtistCreate, ArtistResponse, UserLocationUpdate
 from dotenv import load_dotenv
 from app.auth.utils.current_user import get_current_artist
 # Load environment variables from .env file
@@ -33,6 +33,38 @@ router = APIRouter()
 @router.get("/auth/artist/me")
 async def get_artist_profile(artist: Artist = Depends(get_current_artist)):
     return artist
+
+
+@router.put("/auth/artist/location")
+async def update_artist_location(
+    payload: UserLocationUpdate,
+    current_artist: Artist = Depends(get_current_artist),
+    db: Session = Depends(get_db)
+):
+    """
+    Update authenticated artist's location and address
+    """
+    current_artist.latitude = payload.latitude
+    current_artist.longitude = payload.longitude
+    current_artist.flat_building = payload.flat_building
+    current_artist.street_area = payload.street_area
+    current_artist.landmark = payload.landmark
+    current_artist.pincode = payload.pincode
+    current_artist.city = payload.city
+    current_artist.state = payload.state
+
+    # Build full address string
+    address_parts = [p for p in [payload.flat_building, payload.street_area, payload.landmark, payload.city, payload.state, payload.pincode] if p]
+    current_artist.address = ", ".join(address_parts)
+
+    # Update PostGIS geometry column
+    current_artist.location = f"POINT({payload.longitude} {payload.latitude})"
+
+    db.commit()
+    db.refresh(current_artist)
+
+    return current_artist
+
 
 @router.post("/auth/artist/register", response_model=ArtistResponse)
 async def become_artist(

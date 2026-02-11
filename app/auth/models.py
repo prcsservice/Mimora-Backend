@@ -31,6 +31,11 @@ class User(Base):
 
     city = Column(String, nullable=True)
     address = Column(String, nullable=True)
+    flat_building = Column(String, nullable=True)
+    street_area = Column(String, nullable=True)
+    landmark = Column(String, nullable=True)
+    pincode = Column(String, nullable=True)
+    state = Column(String, nullable=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     travel_radius = Column(Integer, default=10)  # in kilometers
@@ -74,6 +79,11 @@ class Artist(Base):
     # Location Details
     city = Column(String, nullable=False)
     address = Column(String, nullable=False)
+    flat_building = Column(String, nullable=True)
+    street_area = Column(String, nullable=True)
+    landmark = Column(String, nullable=True)
+    pincode = Column(String, nullable=True)
+    state = Column(String, nullable=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     travel_radius = Column(Integer, default=10)  # in kilometers

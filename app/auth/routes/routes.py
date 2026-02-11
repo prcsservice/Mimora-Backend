@@ -33,10 +33,20 @@ async def update_location(
     db: Session = Depends(get_db)
 ):
     """
-    Update authenticated user's location
+    Update authenticated user's location and address
     """
     current_user.latitude = payload.latitude
     current_user.longitude = payload.longitude
+    current_user.flat_building = payload.flat_building
+    current_user.street_area = payload.street_area
+    current_user.landmark = payload.landmark
+    current_user.pincode = payload.pincode
+    current_user.city = payload.city
+    current_user.state = payload.state
+    
+    # Build full address string
+    address_parts = [p for p in [payload.flat_building, payload.street_area, payload.landmark, payload.city, payload.state, payload.pincode] if p]
+    current_user.address = ", ".join(address_parts)
     
     # Update PostGIS geometry column
     # Point(longitude latitude)

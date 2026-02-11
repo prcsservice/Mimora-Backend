@@ -23,6 +23,12 @@ class OAuthRequest(BaseModel):
 class UserLocationUpdate(BaseModel):
     latitude: float
     longitude: float
+    flat_building: str | None = None  # Optional
+    street_area: str
+    landmark: str | None = None  # Optional
+    pincode: str
+    city: str
+    state: str
 
 
 
@@ -60,6 +66,13 @@ class UserResponse(BaseModel):
     token: str | None = None
     latitude: float | None = None
     longitude: float | None = None
+    city: str | None = None
+    state: str | None = None
+    pincode: str | None = None
+    flat_building: str | None = None
+    street_area: str | None = None
+    landmark: str | None = None
+    address: str | None = None
     created_at: datetime
 
     class Config:
