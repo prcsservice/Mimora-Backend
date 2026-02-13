@@ -4,7 +4,7 @@ app/auth/routes.py
 """
 
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from sqlalchemy.orm import Session
 import uuid
 import httpx
@@ -12,14 +12,16 @@ import os
 import hmac
 import hashlib
 import json
-
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from app.auth.database import get_db
 from app.auth.models import Artist, KYCRequest
-from app.auth.schemas import ArtistCreate, ArtistResponse, UserLocationUpdate
+from app.auth.schemas import ArtistCreate, ArtistResponse, UserLocationUpdate, OAuthRequest, EmailSignupRequest, EmailLoginRequest
 from dotenv import load_dotenv
 from app.auth.utils.current_user import get_current_artist
 # Load environment variables from .env file
 load_dotenv()
+limiter = Limiter(key_func=get_remote_address)
 
 # # Debug: Print loaded variables
 # print(f"DEBUG - MEON_API_BASE_URL: {os.getenv('MEON_API_BASE_URL')}")
@@ -76,9 +78,9 @@ async def become_artist(
     KYC verification will be done separately
     """
     # Check username availability
-    existing = db.query(Artist).filter(Artist.username == data.username).first()
+    existing = db.query(Artist).filter(Artist.email == data.email).first()
     if existing:
-        raise HTTPException(status_code=400, detail="Username already taken")
+        raise HTTPException(status_code=400, detail="Email already taken")
     
     # Create artist profile - KYC starts as False
     artist = Artist(
@@ -111,6 +113,168 @@ async def become_artist(
     
     return artist
 
+
+@router.post("/auth/artist/oauth", response_model=ArtistResponse)
+# @limiter.limit("20/minute")  # Rate limit for OAuth login
+async def oauth_login(
+    request: Request,
+    payload: OAuthRequest = OAuthRequest(),
+    authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+  
+    # Extract Bearer token
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401, 
+            detail="Invalid authorization header format. Use: Bearer <token>"
+        )
+    
+    token = authorization.split(" ")[1]
+    
+    # Verify token with Firebase
+    try:
+        from app.auth.firebase import verify_firebase_token
+        decoded = verify_firebase_token(token)
+    except Exception as e:
+        raise HTTPException(
+            status_code=401, 
+            detail=f"Token verification failed: {str(e)}"
+        )
+    
+    # Extract data from decoded token
+    email = decoded.get("email")
+    firebase_uid = decoded.get("uid")
+    provider = decoded.get("firebase", {}).get("sign_in_provider", "unknown")
+    
+    # Validate required fields
+    if not email:
+        raise HTTPException(
+            status_code=400, 
+            detail="Email not found in token. OAuth provider must provide email."
+        )
+    
+    if not firebase_uid:
+        raise HTTPException(
+            status_code=400, 
+            detail="Firebase UID not found in token"
+        )
+    
+    # Check if artist exists by email
+    artist = db.query(Artist).filter(Artist.email == email).first()
+    
+    if artist:
+        # Existing artist - update if needed
+        updated = False
+        
+        if artist.firebase_uid != firebase_uid:
+            artist.firebase_uid = firebase_uid
+            updated = True
+        
+        if artist.provider != provider:
+            artist.provider = provider
+            updated = True
+        
+        if updated:
+            db.commit()
+            db.refresh(artist)
+    else:
+        # Artist must be registered first via /auth/artist/register
+        raise HTTPException(
+            status_code=404, 
+            detail="Artist account not found. Please register as an artist first."
+        )
+    
+    return artist
+
+
+@router.post("/auth/artist/email")
+@limiter.limit("5/minute")  # Strict limit to prevent OTP spam
+async def email_signup(
+    request: Request,
+    payload: EmailSignupRequest,
+    db: Session = Depends(get_db)
+):
+
+    # Delete expired OTPs for this email
+    expired_otps = db.query(EmailArtistOTP).filter(
+        EmailArtistOTP.email == payload.email,
+        EmailArtistOTP.expires_at < datetime.utcnow()
+    ).all()
+    
+    if expired_otps:
+        for expired_otp in expired_otps:
+            db.delete(expired_otp)
+        db.commit()
+        print(f"Deleted {len(expired_otps)} expired OTP(s) for {payload.email}")
+    # 1️⃣ Generate OTP
+    otp = generate_otp()
+
+    # 2️⃣ Store OTP + username
+    otp_entry = EmailArtistOTP(
+        email=payload.email,
+        username=payload.username,
+        otp_hash=hash_otp(otp),
+        expires_at=otp_expiry()
+    )
+
+    db.add(otp_entry)
+    db.commit()
+
+    # 3️⃣ Send OTP email
+    send_otp_email(payload.email, otp)
+
+
+
+
+@router.post("/auth/artist/email/login")
+@limiter.limit("5/minute")
+async def email_login(
+    request: Request,
+    payload: EmailLoginRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    LOGIN: Send OTP to email (email only, no username needed)
+    
+    Request: {"email": "user@example.com"}
+    Response: {"message": "OTP sent to your email", "email": "user@example.com"}
+    """
+    # Check if user exists
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Email not registered. Please signup first.")
+        # Delete expired OTPs for this email
+    expired_otps = db.query(EmailArtistOTP).filter(
+        EmailArtistOTP.email == payload.email,
+        EmailArtistOTP.expires_at < datetime.utcnow()
+    ).all()
+    
+    if expired_otps:
+        for expired_otp in expired_otps:
+            db.delete(expired_otp)
+        db.commit()
+        print(f"Deleted {len(expired_otps)} expired OTP(s) for {payload.email}")
+    # 1️⃣ Generate OTP
+    otp = generate_otp()
+    # Generate OTP
+    otp = generate_otp()
+    
+    # Store OTP with existing username
+    otp_entry = EmailArtistOTP(
+        email=payload.email,
+        username=user.name,
+        otp_hash=hash_otp(otp),
+        expires_at=otp_expiry()
+    )
+    db.add(otp_entry)
+    db.commit()
+    
+    # Send OTP email
+    print(f"DEBUG OTP: {otp}")
+    send_otp_email(payload.email, otp)
+    
+    return {"message": "OTP sent to your email", "email": payload.email}
 
 @router.post("/kyc/start/{artist_id}")
 async def start_kyc(

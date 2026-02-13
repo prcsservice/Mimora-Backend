@@ -145,9 +145,9 @@ async def oauth_login(
             updated = True
         
         # Update name if provided and different
-        if name and user.name != name:
-            user.name = name
-            updated = True
+        # if name and user.name != name:
+        #     user.name = name
+        #     updated = True
         
         if updated:
             db.commit()

@@ -118,6 +118,16 @@ class Artist(Base):
         return self.kyc_verified and self.bank_verified
 
 
+class EmailArtistOTP(Base):
+    __tablename__ = "email_artist_otps"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String, nullable=False)
+    username = Column(String, nullable=False)  # store username here
+    otp_hash = Column(String, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+
+
 class KYCRequest(Base):
     """KYC Verification Request Tracking"""
     __tablename__ = "kyc_requests"
