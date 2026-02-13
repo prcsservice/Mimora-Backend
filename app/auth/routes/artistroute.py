@@ -15,10 +15,19 @@ import json
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from app.auth.database import get_db
-from app.auth.models import Artist, KYCRequest
-from app.auth.schemas import ArtistCreate, ArtistResponse, UserLocationUpdate, OAuthRequest, EmailSignupRequest, EmailLoginRequest
+from app.auth.models import Artist, KYCRequest, EmailArtistOTP, User
+from app.auth.schemas import (
+    ArtistCreate, ArtistResponse, UserLocationUpdate,
+    ArtistOAuthRequest, EmailSignupRequest, EmailLoginRequest,
+    CheckUserRequest, ArtistVerifyOTPRequest
+)
+from app.auth.firebase import verify_firebase_token
+from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
+from app.auth.utils.send_email import send_otp_email
 from dotenv import load_dotenv
 from app.auth.utils.current_user import get_current_artist
+import firebase_admin
+from firebase_admin import auth as firebase_auth
 # Load environment variables from .env file
 load_dotenv()
 limiter = Limiter(key_func=get_remote_address)
@@ -114,11 +123,35 @@ async def become_artist(
     return artist
 
 
+@router.post("/auth/customer/check")
+async def check_user_exists(
+    payload: CheckUserRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Check if a user exists without creating or modifying anything.
+    Used by frontend to distinguish login vs signup flows.
+    """
+    from app.auth.schemas import CheckUserResponse
+    
+    if payload.type == "email":
+        user = db.query(User).filter(User.email == payload.identifier).first()
+    elif payload.type == "phone":
+        user = db.query(User).filter(User.phone_number == payload.identifier).first()
+    else:
+        raise HTTPException(status_code=400, detail="Invalid type. Use 'email' or 'phone'")
+    
+    return CheckUserResponse(
+        exists=user is not None,
+        user_type="customer" if user else None
+    )
+
+
 @router.post("/auth/artist/oauth", response_model=ArtistResponse)
-# @limiter.limit("20/minute")  # Rate limit for OAuth login
+@limiter.limit("20/minute")  # Rate limit for OAuth login
 async def oauth_login(
     request: Request,
-    payload: OAuthRequest = OAuthRequest(),
+    payload: ArtistOAuthRequest = ArtistOAuthRequest(),
     authorization: str = Header(...),
     db: Session = Depends(get_db)
 ):
@@ -134,7 +167,6 @@ async def oauth_login(
     
     # Verify token with Firebase
     try:
-        from app.auth.firebase import verify_firebase_token
         decoded = verify_firebase_token(token)
     except Exception as e:
         raise HTTPException(
@@ -144,6 +176,7 @@ async def oauth_login(
     
     # Extract data from decoded token
     email = decoded.get("email")
+    name = decoded.get("name")
     firebase_uid = decoded.get("uid")
     provider = decoded.get("firebase", {}).get("sign_in_provider", "unknown")
     
@@ -160,32 +193,49 @@ async def oauth_login(
             detail="Firebase UID not found in token"
         )
     
-    # Check if artist exists by email
-    artist = db.query(Artist).filter(Artist.email == email).first()
+    # Check if user exists by email
+    user = db.query(Artist).filter(Artist.email == email).first()
     
-    if artist:
-        # Existing artist - update if needed
+    if user:
+        # Existing user - update if needed
         updated = False
         
-        if artist.firebase_uid != firebase_uid:
-            artist.firebase_uid = firebase_uid
+        if user.firebase_uid != firebase_uid:
+            user.firebase_uid = firebase_uid
             updated = True
         
-        if artist.provider != provider:
-            artist.provider = provider
+        if user.provider != provider:
+            user.provider = provider
             updated = True
+        
+        # Update name if provided and different
+        # if name and user.name != name:
+        #     user.name = name
+        #     updated = True
         
         if updated:
             db.commit()
-            db.refresh(artist)
+            db.refresh(user)
     else:
-        # Artist must be registered first via /auth/artist/register
-        raise HTTPException(
-            status_code=404, 
-            detail="Artist account not found. Please register as an artist first."
+        # New user - create
+        user = Artist(
+            firebase_uid=firebase_uid,
+            email=email,
+            name=name,
+            phone_number=payload.phone_number,
+            birthdate=payload.birthdate,
+            gender=payload.gender,
+            experience=payload.experience,
+            bio=payload.bio,
+            provider=provider,
+            latitude=payload.latitude,
+            longitude=payload.longitude
         )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
     
-    return artist
+    return user
 
 
 @router.post("/auth/artist/email")
@@ -224,7 +274,85 @@ async def email_signup(
     # 3️⃣ Send OTP email
     send_otp_email(payload.email, otp)
 
+    return {"message": "OTP sent to your email", "email": payload.email}
 
+
+@router.post("/auth/artist/email/verify", response_model=ArtistResponse)
+@limiter.limit("10/minute")  # Prevent brute-force OTP guessing
+async def verify_email_otp(
+    request: Request,
+    payload: ArtistVerifyOTPRequest,
+    db: Session = Depends(get_db)
+):
+    # 1️⃣ Get the latest OTP record for this email
+    otp_record = (
+        db.query(EmailArtistOTP)
+        .filter(EmailArtistOTP.email == payload.email)
+        .order_by(EmailArtistOTP.id.desc())
+        .first()
+    )
+
+    if not otp_record:
+        print(f"DEBUG: OTP not found for email {payload.email}")
+        raise HTTPException(status_code=400, detail="OTP not found")
+
+    # 2️⃣ Check expiry
+    if otp_record.expires_at < datetime.utcnow():
+        print(f"DEBUG: OTP expired for {payload.email}. Expires: {otp_record.expires_at}, Now: {datetime.utcnow()}")
+        raise HTTPException(status_code=400, detail="OTP expired")
+
+    # 3️⃣ Verify OTP
+    if not verify_otp(payload.otp, otp_record.otp_hash):
+        print(f"DEBUG: Invalid OTP for {payload.email}. Provided: {payload.otp}")
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    # 4️⃣ Get the username from OTP record
+    username = otp_record.username
+
+    # 5️⃣ Delete the used OTP
+    db.delete(otp_record)
+    db.commit()
+
+    # 6️⃣ Check if user already exists
+    user = db.query(Artist).filter(Artist.email == payload.email).first()
+
+    if not user:
+        # 7️⃣ Create user in Firebase
+        try:
+            firebase_user = firebase_auth.create_user(
+                email=payload.email,
+                display_name=username
+            )
+        except firebase_auth.EmailAlreadyExistsError:
+            firebase_user = firebase_auth.get_user_by_email(payload.email)
+
+        # 8️⃣ Create artist in DB
+        user = Artist(
+            email=payload.email,
+            username=username,
+            name=username,
+            phone_number=payload.phone_number,
+            birthdate=payload.birthdate,
+            gender=payload.gender,
+            experience=payload.experience,
+            bio=payload.bio,
+            provider="email",
+            firebase_uid=firebase_user.uid,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    # 9️⃣ Generate Firebase Custom Token
+    try:
+        custom_token = firebase_auth.create_custom_token(user.firebase_uid)
+        if isinstance(custom_token, bytes):
+            custom_token = custom_token.decode("utf-8")
+        user.token = custom_token
+    except Exception as e:
+        print(f"Error generating custom token: {e}")
+
+    return user
 
 
 @router.post("/auth/artist/email/login")
@@ -240,11 +368,12 @@ async def email_login(
     Request: {"email": "user@example.com"}
     Response: {"message": "OTP sent to your email", "email": "user@example.com"}
     """
-    # Check if user exists
-    user = db.query(User).filter(User.email == payload.email).first()
+    # Check if artist exists
+    user = db.query(Artist).filter(Artist.email == payload.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="Email not registered. Please signup first.")
-        # Delete expired OTPs for this email
+
+    # Delete expired OTPs for this email
     expired_otps = db.query(EmailArtistOTP).filter(
         EmailArtistOTP.email == payload.email,
         EmailArtistOTP.expires_at < datetime.utcnow()
@@ -255,15 +384,14 @@ async def email_login(
             db.delete(expired_otp)
         db.commit()
         print(f"Deleted {len(expired_otps)} expired OTP(s) for {payload.email}")
-    # 1️⃣ Generate OTP
-    otp = generate_otp()
+
     # Generate OTP
     otp = generate_otp()
     
     # Store OTP with existing username
     otp_entry = EmailArtistOTP(
         email=payload.email,
-        username=user.name,
+        username=user.username or user.name,
         otp_hash=hash_otp(otp),
         expires_at=otp_expiry()
     )
@@ -271,7 +399,6 @@ async def email_login(
     db.commit()
     
     # Send OTP email
-    print(f"DEBUG OTP: {otp}")
     send_otp_email(payload.email, otp)
     
     return {"message": "OTP sent to your email", "email": payload.email}
@@ -345,7 +472,7 @@ async def start_kyc(
                     "artist_id": str(artist.id),
                     "reference_id": str(kyc_request.id)
                 },
-                "is_redirect" : true,
+                "is_redirect" : True,
                 "redirect_url" : "https://www.google.com",
 
                 
@@ -512,7 +639,7 @@ async def start_face_verification(
                     "artist_id": str(artist.id),
                     "reference_id": str(kyc_request.id)
                 },
-                "is_redirect" : true,
+                "is_redirect" : True,
                 "redirect_url" : "https://www.google.com",
             }
             
@@ -637,7 +764,7 @@ async def kyc_webhook(
     
     # Verify webhook signature for security (if configured)
     if x_meon_signature and os.getenv('MEON_WEBHOOK_SECRET'):
-        expected_signature = hmac.new(
+        expected_signature = hmac.HMAC(
             os.getenv('MEON_WEBHOOK_SECRET').encode(),
             json.dumps(payload, sort_keys=True).encode(),
             hashlib.sha256

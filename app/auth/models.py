@@ -64,8 +64,13 @@ class Artist(Base):
     # Primary Key
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
+    # Auth / OAuth
+    firebase_uid = Column(String, unique=True, index=True, nullable=True)
+    provider = Column(String, nullable=True)  # google | phone | email
+
     # Profile Information
-    username = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=True)  # Display name from OAuth provider
+    username = Column(String, unique=True, index=True, nullable=True)
     email = Column(String, unique=True, index=True, nullable=True)
     phone_number = Column(String, unique=True, index=True, nullable=True)
     birthdate = Column(DateTime, nullable=True)

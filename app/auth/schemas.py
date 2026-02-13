@@ -1,11 +1,8 @@
 # app/auth/schemas.py
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from uuid import UUID
-from proto import Field
-from pydantic import BaseModel, EmailStr,Field
+from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
-from geoalchemy2 import Geography
-from typing import Tuple
 
 
 class OTPRequest(BaseModel):
@@ -16,6 +13,16 @@ class OTPRequest(BaseModel):
 
 
 class OAuthRequest(BaseModel):
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+class ArtistOAuthRequest(BaseModel):
+    phone_number: str | None = None
+    birthdate: datetime | None = None
+    gender: str | None = None
+    experience: str | None = None
+    bio: str | None = None
     latitude: float | None = None
     longitude: float | None = None
 
@@ -40,6 +47,9 @@ class EmailSignupRequest(BaseModel):
 class VerifyOTPRequest(BaseModel):
     email: EmailStr
     otp: str
+
+
+
 
 
 class CheckUserRequest(BaseModel):
@@ -104,6 +114,16 @@ class ArtistCreate(BaseModel):
     class Config:
         populate_by_name = True 
 
+
+class ArtistVerifyOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    phone_number: str | None = None
+    birthdate: datetime | None = None
+    gender: str | None = None
+    experience: str | None = None
+    bio: str | None = None
+
 class ArtistUpdate(BaseModel):
     bio: Optional[str] = None
     profession: Optional[List[str]] = None
@@ -111,13 +131,24 @@ class ArtistUpdate(BaseModel):
 
 class ArtistResponse(BaseModel):
     id: UUID
-    username: str
-    bio: str
-    profession: List[str]
-    city: str
-    rating: float
-    total_reviews: int
-    kyc_verified: bool
-    
+    firebase_uid: str | None = None
+    name: str | None = None
+    username: str | None = None
+    email: EmailStr | None = None
+    phone_number: str | None = None
+    birthdate: datetime | None = None
+    gender: str | None = None
+    bio: str | None = None
+    experience: str | None = None
+    provider: str | None = None
+    profession: List[str] | None = None
+    city: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    rating: float | None = None
+    total_reviews: int | None = None
+    kyc_verified: bool | None = None
+    created_at: datetime | None = None
+
     class Config:
         from_attributes = True
