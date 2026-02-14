@@ -76,14 +76,17 @@ class Artist(Base):
     birthdate = Column(DateTime, nullable=True)
     gender = Column(String, nullable=True)
     bio = Column(Text, nullable=True)
+    profile_pic_url = Column(String, nullable=True)  # Firebase Storage URL
     
     # Professional Details
     profession = Column(ARRAY(String), default=list)  # ["Bridal Makeup", "Party Makeup"]
     experience = Column(String, nullable=True)  # "beginner" | "intermediate" | "expert"
+    how_did_you_learn = Column(String, nullable=True)  # "professional" | "self-learned" | "apprentice"
+    certificate_url = Column(String, nullable=True)  # Certificate image URL
 
     # Location Details
-    city = Column(String, nullable=False)
-    address = Column(String, nullable=False)
+    city = Column(String, nullable=True)
+    address = Column(String, nullable=True)
     flat_building = Column(String, nullable=True)
     street_area = Column(String, nullable=True)
     landmark = Column(String, nullable=True)
@@ -109,6 +112,7 @@ class Artist(Base):
 
     # Account Status
     is_active = Column(Boolean, default=True)
+    profile_completed = Column(Boolean, default=False, nullable=False)  # Has artist completed full profile?
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)

@@ -19,7 +19,8 @@ from app.auth.models import Artist, KYCRequest, EmailArtistOTP, User
 from app.auth.schemas import (
     ArtistCreate, ArtistResponse, UserLocationUpdate,
     ArtistOAuthRequest, EmailSignupRequest, EmailLoginRequest,
-    CheckUserRequest, ArtistVerifyOTPRequest
+    CheckUserRequest, ArtistVerifyOTPRequest, OTPRequest,
+    ArtistProfileCompleteRequest
 )
 from app.auth.firebase import verify_firebase_token
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
@@ -123,28 +124,53 @@ async def become_artist(
     return artist
 
 
-@router.post("/auth/customer/check")
-async def check_user_exists(
+@router.post("/auth/artist/check")
+@limiter.limit("10/minute")  # Rate limit: 10 checks per minute
+async def check_artist_exists(
+    request: Request,
     payload: CheckUserRequest,
     db: Session = Depends(get_db)
 ):
     """
-    Check if a user exists without creating or modifying anything.
-    Used by frontend to distinguish login vs signup flows.
+    Check if an artist exists by email or phone.
+    Also cross-checks the customer table for the crossover scenario.
     """
-    from app.auth.schemas import CheckUserResponse
-    
-    if payload.type == "email":
-        user = db.query(User).filter(User.email == payload.identifier).first()
-    elif payload.type == "phone":
-        user = db.query(User).filter(User.phone_number == payload.identifier).first()
-    else:
-        raise HTTPException(status_code=400, detail="Invalid type. Use 'email' or 'phone'")
-    
-    return CheckUserResponse(
-        exists=user is not None,
-        user_type="customer" if user else None
-    )
+    try:
+        from app.auth.schemas import CheckUserResponse
+        
+        print(f"DEBUG check_artist_exists: type={payload.type}, identifier={payload.identifier}")
+        
+        # Check Artist table first
+        if payload.type == "email":
+            artist = db.query(Artist).filter(Artist.email == payload.identifier).first()
+        elif payload.type == "phone":
+            artist = db.query(Artist).filter(Artist.phone_number == payload.identifier).first()
+        else:
+            raise HTTPException(status_code=400, detail="Invalid type. Use 'email' or 'phone'")
+        
+        if artist:
+            print(f"DEBUG: Found artist: {artist.id}")
+            return CheckUserResponse(exists=True, user_type="artist")
+        
+        # Not an artist — check if they're a customer
+        if payload.type == "email":
+            customer = db.query(User).filter(User.email == payload.identifier).first()
+        else:
+            customer = db.query(User).filter(User.phone_number == payload.identifier).first()
+        
+        if customer:
+            print(f"DEBUG: Found customer: {customer.id}")
+            return CheckUserResponse(exists=True, user_type="customer")
+        
+        print("DEBUG: User not found in either table")
+        return CheckUserResponse(exists=False, user_type=None)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR in check_artist_exists: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
 @router.post("/auth/artist/oauth", response_model=ArtistResponse)
@@ -208,34 +234,230 @@ async def oauth_login(
             user.provider = provider
             updated = True
         
-        # Update name if provided and different
-        # if name and user.name != name:
-        #     user.name = name
-        #     updated = True
+        # Update location if provided
+        if payload.latitude and payload.longitude:
+            user.latitude = payload.latitude
+            user.longitude = payload.longitude
+            updated = True
         
         if updated:
             db.commit()
             db.refresh(user)
     else:
-        # New user - create
+        # New user - create minimal profile
         user = Artist(
             firebase_uid=firebase_uid,
             email=email,
             name=name,
-            phone_number=payload.phone_number,
-            birthdate=payload.birthdate,
-            gender=payload.gender,
-            experience=payload.experience,
-            bio=payload.bio,
             provider=provider,
             latitude=payload.latitude,
-            longitude=payload.longitude
+            longitude=payload.longitude,
+            profile_completed=False,
+            kyc_verified=False,
+            rating=0.0,
+            total_reviews=0
         )
         db.add(user)
         db.commit()
         db.refresh(user)
     
     return user
+
+
+# ============ Phone OTP Auth (NEW) ============
+@router.post("/auth/artist/otp", response_model=ArtistResponse)
+@limiter.limit("20/minute")
+async def otp_auth(
+    request: Request,
+    payload: OTPRequest,
+    authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Authenticate artist with Firebase phone OTP.
+    Creates minimal artist profile if new user.
+    """
+    # Extract Bearer token
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization header format. Use: Bearer <token>"
+        )
+    
+    token = authorization.split(" ")[1]
+    
+    # Verify Firebase token
+    try:
+        decoded = verify_firebase_token(token)
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Token verification failed: {str(e)}"
+        )
+    
+    # Extract phone number and firebase_uid
+    phone_number = decoded.get("phone_number")
+    firebase_uid = decoded.get("uid")
+    provider = "phone"
+    
+    if not firebase_uid:
+        raise HTTPException(status_code=400, detail="Firebase UID not found in token")
+    
+    if not phone_number:
+        raise HTTPException(status_code=400, detail="Phone number not found in token")
+    
+    # Check if artist exists by phone number or firebase_uid
+    artist = db.query(Artist).filter(Artist.phone_number == phone_number).first()
+    if not artist:
+        artist = db.query(Artist).filter(Artist.firebase_uid == firebase_uid).first()
+    
+    if artist:
+        # Existing artist - update firebase_uid and provider if needed
+        updated = False
+        
+        if artist.firebase_uid != firebase_uid:
+            artist.firebase_uid = firebase_uid
+            updated = True
+        
+        if artist.provider != provider:
+            artist.provider = provider
+            updated = True
+        
+        # Update name if provided and not already set
+        if payload.name and not artist.name:
+            artist.name = payload.name
+            updated = True
+        
+        # Update location if provided
+        if payload.latitude and payload.longitude:
+            artist.latitude = payload.latitude
+            artist.longitude = payload.longitude
+            updated = True
+        
+        if updated:
+            db.commit()
+            db.refresh(artist)
+        
+        print(f"Artist {artist.id} logged in via phone OTP")
+    else:
+        # Create new artist with minimal data
+        artist = Artist(
+            firebase_uid=firebase_uid,
+            phone_number=phone_number,
+            name=payload.name,
+            provider=provider,
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            profile_completed=False,
+            kyc_verified=False,
+            rating=0.0,
+            total_reviews=0
+        )
+        db.add(artist)
+        db.commit()
+        db.refresh(artist)
+        print(f"Created new artist {artist.id} via phone OTP")
+    
+    return artist
+
+
+# ============ Profile Completion (NEW) ============
+@router.put("/auth/artist/profile", response_model=ArtistResponse)
+async def complete_artist_profile(
+    payload: ArtistProfileCompleteRequest,
+    current_artist: Artist = Depends(get_current_artist),
+    db: Session = Depends(get_db)
+):
+    """
+    Complete artist profile with additional details.
+    Called after initial authentication to fill in all profile fields.
+    """
+    # Convert birthdate from DD/MM/YYYY to datetime
+    if payload.birthdate:
+        try:
+            day, month, year = payload.birthdate.split('/')
+            current_artist.birthdate = datetime(int(year), int(month), int(day))
+        except (ValueError, AttributeError) as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid birthdate format. Use DD/MM/YYYY: {str(e)}"
+            )
+    
+    # Update personal details
+    if payload.name is not None:
+        current_artist.name = payload.name
+    if payload.username is not None:
+        # Check username uniqueness
+        existing = db.query(Artist).filter(
+            Artist.username == payload.username,
+            Artist.id != current_artist.id
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Username already taken")
+        current_artist.username = payload.username
+    if payload.phone_number is not None:
+        # Check phone uniqueness
+        existing = db.query(Artist).filter(
+            Artist.phone_number == payload.phone_number,
+            Artist.id != current_artist.id
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Phone number already registered")
+        current_artist.phone_number = payload.phone_number
+    if payload.gender is not None:
+        current_artist.gender = payload.gender
+    if payload.experience is not None:
+        current_artist.experience = payload.experience
+    if payload.bio is not None:
+        current_artist.bio = payload.bio
+    if payload.profile_pic_url is not None:
+        current_artist.profile_pic_url = payload.profile_pic_url
+    
+    # Update professional info
+    if payload.how_did_you_learn is not None:
+        current_artist.how_did_you_learn = payload.how_did_you_learn
+    if payload.certificate_url is not None:
+        current_artist.certificate_url = payload.certificate_url
+    if payload.profession is not None:
+        current_artist.profession = payload.profession
+    
+    # Update address
+    if payload.flat_building is not None:
+        current_artist.flat_building = payload.flat_building
+    if payload.street_area is not None:
+        current_artist.street_area = payload.street_area
+    if payload.landmark is not None:
+        current_artist.landmark = payload.landmark
+    if payload.pincode is not None:
+        current_artist.pincode = payload.pincode
+    if payload.city is not None:
+        current_artist.city = payload.city
+    if payload.state is not None:
+        current_artist.state = payload.state
+    if payload.latitude is not None and payload.longitude is not None:
+        current_artist.latitude = payload.latitude
+        current_artist.longitude = payload.longitude
+    
+    # Build address string from components
+    addr_parts = [p for p in [
+        current_artist.flat_building,
+        current_artist.street_area,
+        current_artist.landmark,
+        current_artist.city,
+        current_artist.state,
+        current_artist.pincode
+    ] if p]
+    if addr_parts:
+        current_artist.address = ", ".join(addr_parts)
+    
+    # Mark profile as completed
+    current_artist.profile_completed = True
+    
+    db.commit()
+    db.refresh(current_artist)
+    print(f"Artist {current_artist.id} completed profile")
+    
+    return current_artist
 
 
 @router.post("/auth/artist/email")
@@ -338,6 +560,10 @@ async def verify_email_otp(
             bio=payload.bio,
             provider="email",
             firebase_uid=firebase_user.uid,
+            profile_completed=False,
+            kyc_verified=False,
+            rating=0.0,
+            total_reviews=0
         )
         db.add(user)
         db.commit()
@@ -1062,3 +1288,86 @@ async def test_endpoints():
     """Temporary endpoint to test Meon API endpoints"""
     await test_meon_endpoints()
     return {"message": "Check server logs for endpoint test results"}
+
+
+# ============ PROFILE COMPLETION ENDPOINT ============
+
+@router.put("/auth/artist/profile", response_model=ArtistResponse)
+async def complete_artist_profile(
+    request: Request,
+    payload: ArtistProfileCompleteRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Complete artist profile after initial signup
+    Receives Firebase Storage URLs from frontend
+    """
+    try:
+        # Get current artist from Firebase token
+        artist = await get_current_artist(request, db)
+        
+        # Update personal details
+        if payload.name:
+            artist.name = payload.name
+        if payload.username:
+            artist.username = payload.username
+        if payload.phone_number:
+            artist.phone_number = payload.phone_number
+        if payload.birthdate:
+            # Convert DD/MM/YYYY to datetime
+            from datetime import datetime
+            artist.birthdate = datetime.strptime(payload.birthdate, "%d/%m/%Y")
+        if payload.gender:
+            artist.gender = payload.gender
+        if payload.experience:
+            artist.experience = payload.experience
+        if payload.bio:
+            artist.bio = payload.bio
+        
+        # Update file URLs (from Firebase Storage)
+        if payload.profile_pic_url:
+            artist.profile_pic_url = payload.profile_pic_url
+        if payload.certificate_url:
+            artist.certificate_url = payload.certificate_url
+        
+        # Update professional info
+        if payload.how_did_you_learn:
+            artist.how_did_you_learn = payload.how_did_you_learn
+        if payload.profession:
+            artist.profession = payload.profession
+        
+        # Update address
+        if payload.flat_building:
+            artist.flat_building = payload.flat_building
+        if payload.street_area:
+            artist.street_area = payload.street_area
+        if payload.landmark:
+            artist.landmark = payload.landmark
+        if payload.pincode:
+            artist.pincode = payload.pincode
+        if payload.city:
+            artist.city = payload.city
+        if payload.state:
+            artist.state = payload.state
+        if payload.latitude and payload.longitude:
+            artist.latitude = payload.latitude
+            artist.longitude = payload.longitude
+            # Build address string
+            address_parts = [p for p in [payload.flat_building, payload.street_area, payload.landmark, payload.city, payload.state, payload.pincode] if p]
+            artist.address = ", ".join(address_parts)
+            # Update PostGIS geometry
+            artist.location = f"POINT({payload.longitude} {payload.latitude})"
+        
+        # Mark profile as completed
+        artist.profile_completed = True
+        
+        db.commit()
+        db.refresh(artist)
+        
+        return artist
+        
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR completing profile: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+

@@ -1,5 +1,5 @@
 # app/auth/schemas.py
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
@@ -129,6 +129,35 @@ class ArtistUpdate(BaseModel):
     profession: Optional[List[str]] = None
     city: Optional[str] = None
 
+
+class ArtistProfileCompleteRequest(BaseModel):
+    """Schema for completing artist profile after initial auth"""
+    # Step 1: Personal Details
+    phone_number: str | None = None
+    birthdate: str | None = None  # DD/MM/YYYY format from frontend
+    gender: str | None = None
+    experience: str | None = None
+    bio: str | None = None
+    profile_pic_url: str | None = None
+    name: str | None = None
+    username: str | None = None
+
+    # Step 3: Professional Info
+    how_did_you_learn: str | None = None  # 'professional', 'self-learned', 'apprentice'
+    certificate_url: str | None = None
+    profession: List[str] | None = None
+
+    # Step 4: Address
+    flat_building: str | None = None
+    street_area: str | None = None
+    landmark: str | None = None
+    pincode: str | None = None
+    city: str | None = None
+    state: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
 class ArtistResponse(BaseModel):
     id: UUID
     firebase_uid: str | None = None
@@ -149,6 +178,18 @@ class ArtistResponse(BaseModel):
     total_reviews: int | None = None
     kyc_verified: bool | None = None
     created_at: datetime | None = None
+    token: str | None = None
+
+    # Profile completion tracking
+    profile_completed: bool = False
+    profile_pic_url: str | None = None
+    how_did_you_learn: str | None = None
+    certificate_url: str | None = None
+    flat_building: str | None = None
+    street_area: str | None = None
+    landmark: str | None = None
+    pincode: str | None = None
+    state: str | None = None
 
     class Config:
         from_attributes = True

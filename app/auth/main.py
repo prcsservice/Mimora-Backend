@@ -16,6 +16,23 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 app = FastAPI(title="Mimora Auth Service")
 
+# CORS origins
+origins = [
+    "http://localhost:3000",      # React dev server
+    "http://localhost:5173",      # Vite dev server
+    "https://yourdomain.com",     # Production frontend
+    "https://www.yourdomain.com", # Production frontend with www
+]
+
+# Add CORS middleware FIRST (outermost) so preflight requests are handled
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,           # Allowed origins
+    allow_credentials=True,          # Allow cookies
+    allow_methods=["*"],             # Allow all HTTP methods (GET, POST, etc.)
+    allow_headers=["*"],             # Allow all headers
+)
+
 # Add rate limiter to app state and middleware
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -36,21 +53,6 @@ def on_startup():
 
 app.include_router(auth_router)
 app.include_router(artist_router)
-
-origins = [
-    "http://localhost:3000",      # React dev server
-    "http://localhost:5173",      # Vite dev server
-    "https://yourdomain.com",     # Production frontend
-    "https://www.yourdomain.com", # Production frontend with www
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,           # Allowed origins
-    allow_credentials=True,          # Allow cookies
-    allow_methods=["*"],             # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],             # Allow all headers
-)
 
 
 
