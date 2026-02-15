@@ -10,7 +10,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 from app.auth.firebase import verify_firebase_token
 from app.auth.schemas import EmailSignupRequest, OAuthRequest, OTPRequest, VerifyOTPRequest, UserResponse, CheckUserRequest, EmailLoginRequest, UserLocationUpdate
-from app.auth.models import User, EmailOTP
+from app.auth.models import User, EmailOTP, Artist
 from app.auth.database import get_db
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
 from app.auth.utils.send_email import send_otp_email
@@ -153,6 +153,14 @@ async def oauth_login(
             db.commit()
             db.refresh(user)
     else:
+        # NEW: Check if email exists as Artist (prevent cross-account duplicates)
+        existing_artist = db.query(Artist).filter(Artist.email == email).first()
+        if existing_artist:
+            raise HTTPException(
+                status_code=400,
+                detail="This email is registered as an artist account. Please use the artist login."
+            )
+        
         # New user - create
         user = User(
             firebase_uid=firebase_uid,

@@ -42,8 +42,16 @@ router = APIRouter()
 
 
 
-@router.get("/auth/artist/me")
+@router.get("/auth/artist/me", response_model=ArtistResponse)
 async def get_artist_profile(artist: Artist = Depends(get_current_artist)):
+    """
+    Get the authenticated artist's full profile.
+    
+    Used by frontend as fallback when localStorage is missing/corrupted.
+    Returns all profile data including booking preferences, portfolio, and bank details.
+    
+    Requires: Firebase authentication token in Authorization header
+    """
     return artist
 
 
@@ -244,22 +252,48 @@ async def oauth_login(
             db.commit()
             db.refresh(user)
     else:
-        # New user - create minimal profile
-        user = Artist(
-            firebase_uid=firebase_uid,
-            email=email,
-            name=name,
-            provider=provider,
-            latitude=payload.latitude,
-            longitude=payload.longitude,
-            profile_completed=False,
-            kyc_verified=False,
-            rating=0.0,
-            total_reviews=0
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+        # NEW: Check if email exists as Customer (prevent cross-account duplicates)
+        existing_customer = db.query(User).filter(User.email == email).first()
+        if existing_customer:
+            raise HTTPException(
+                status_code=400,
+                detail="This email is registered as a customer account. Please use the customer login."
+            )
+        
+        # New user
+        if payload.mode == "signup":
+            # Generate username from email (part before @)
+            base_username = email.split("@")[0].lower().replace(".", "_")
+            username = base_username
+            # Ensure uniqueness
+            counter = 1
+            while db.query(Artist).filter(Artist.username == username).first():
+                username = f"{base_username}{counter}"
+                counter += 1
+
+            # Create minimal profile for signup flow
+            user = Artist(
+                firebase_uid=firebase_uid,
+                email=email,
+                name=name,
+                username=username,
+                provider=provider,
+                latitude=payload.latitude,
+                longitude=payload.longitude,
+                profile_completed=False,
+                kyc_verified=False,
+                rating=0.0,
+                total_reviews=0
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        else:
+            # Login mode - don't auto-create new artists
+            raise HTTPException(
+                status_code=404,
+                detail="No artist account found. Please sign up first."
+            )
     
     return user
 
@@ -421,6 +455,38 @@ async def complete_artist_profile(
     if payload.profession is not None:
         current_artist.profession = payload.profession
     
+    # Update booking preferences
+    if payload.booking_mode is not None:
+        current_artist.booking_mode = payload.booking_mode
+    if payload.skills is not None:
+        current_artist.skills = payload.skills
+    if payload.event_types is not None:
+        current_artist.event_types = payload.event_types
+    if payload.service_location is not None:
+        current_artist.service_location = payload.service_location
+    if payload.travel_willingness is not None:
+        current_artist.travel_willingness = payload.travel_willingness
+    if payload.studio_address is not None:
+        current_artist.studio_address = payload.studio_address
+    if payload.working_hours is not None:
+        current_artist.working_hours = payload.working_hours
+
+    # Update portfolio (Step 3)
+    if payload.portfolio is not None:
+        current_artist.portfolio = payload.portfolio
+
+    # Update bank details (Step 4)
+    if payload.bank_account_name is not None:
+        current_artist.bank_account_name = payload.bank_account_name
+    if payload.bank_account_number is not None:
+        current_artist.bank_account_number = payload.bank_account_number
+    if payload.bank_name is not None:
+        current_artist.bank_name = payload.bank_name
+    if payload.bank_ifsc is not None:
+        current_artist.bank_ifsc = payload.bank_ifsc
+    if payload.upi_id is not None:
+        current_artist.upi_id = payload.upi_id
+
     # Update address
     if payload.flat_building is not None:
         current_artist.flat_building = payload.flat_building
@@ -450,8 +516,9 @@ async def complete_artist_profile(
     if addr_parts:
         current_artist.address = ", ".join(addr_parts)
     
-    # Mark profile as completed
-    current_artist.profile_completed = True
+    # Only mark profile as completed when all steps are done
+    if payload.mark_complete:
+        current_artist.profile_completed = True
     
     db.commit()
     db.refresh(current_artist)
@@ -1357,9 +1424,9 @@ async def complete_artist_profile(
             artist.address = ", ".join(address_parts)
             # Update PostGIS geometry
             artist.location = f"POINT({payload.longitude} {payload.latitude})"
-        
-        # Mark profile as completed
-        artist.profile_completed = True
+        # Only mark profile as completed when all steps are done
+        if payload.mark_complete:
+            artist.profile_completed = True
         
         db.commit()
         db.refresh(artist)

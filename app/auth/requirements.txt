@@ -10,3 +10,4 @@ sqlalchemy
 databases
 geoalchemy2
 slowapi
+httpx

@@ -12,7 +12,7 @@ Usage in routes:
 from fastapi import Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 
-from app.auth.firebase import verify_firebase_token
+from app.auth.firebase import verify_token
 from app.auth.database import get_db
 from app.auth.models import User
 
@@ -44,9 +44,9 @@ async def get_current_user(
     
     token = authorization.split(" ")[1]
     
-    # Verify token with Firebase
+    # Verify token (handles both Firebase ID and custom tokens)
     try:
-        decoded = verify_firebase_token(token)
+        decoded = verify_token(token)
     except Exception as e:
         raise HTTPException(
             status_code=401,
@@ -64,6 +64,13 @@ async def get_current_user(
     
     # Search for user in database
     user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
+    
+    # Also try email/phone if provided in token (for robustness)
+    if not user and (decoded.get("email") or decoded.get("phone_number")):
+        if decoded.get("email"):
+            user = db.query(User).filter(User.email == decoded.get("email")).first()
+        if not user and decoded.get("phone_number"):
+            user = db.query(User).filter(User.phone_number == decoded.get("phone_number")).first()
     
     if not user:
         raise HTTPException(
@@ -93,9 +100,10 @@ async def get_current_artist(
     
     token = authorization.split(" ")[1]
     
-    # Verify token with Firebase
+    
+    # Verify token (handles both Firebase ID and custom tokens)
     try:
-        decoded = verify_firebase_token(token)
+        decoded = verify_token(token)
     except Exception as e:
         raise HTTPException(
             status_code=401,
@@ -113,9 +121,11 @@ async def get_current_artist(
             detail="Invalid token: Firebase UID not found"
         )
     
-    # Search for artist by email or phone
-    artist = None
-    if email:
+    # Search for artist by firebase_uid first (most reliable)
+    artist = db.query(Artist).filter(Artist.firebase_uid == firebase_uid).first()
+    
+    # Fallback to email or phone if firebase_uid lookup failed
+    if not artist and email:
         artist = db.query(Artist).filter(Artist.email == email).first()
     if not artist and phone:
         artist = db.query(Artist).filter(Artist.phone_number == phone).first()

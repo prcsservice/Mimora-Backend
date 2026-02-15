@@ -25,6 +25,7 @@ class ArtistOAuthRequest(BaseModel):
     bio: str | None = None
     latitude: float | None = None
     longitude: float | None = None
+    mode: str = "login"  # "login" or "signup"
 
 
 class UserLocationUpdate(BaseModel):
@@ -157,6 +158,28 @@ class ArtistProfileCompleteRequest(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
 
+    # Step 2: Booking Preferences
+    booking_mode: str | None = None  # 'instant' | 'flexi' | 'both'
+    skills: List[str] | None = None
+    event_types: List[str] | None = None
+    service_location: str | None = None  # 'client' | 'studio' | 'both'
+    travel_willingness: List[str] | None = None
+    studio_address: str | None = None  # JSON string
+    working_hours: str | None = None  # JSON string
+
+    # Step 3: Portfolio
+    portfolio: List[str] | None = None
+
+    # Step 4: Bank Details
+    bank_account_name: str | None = None
+    bank_account_number: str | None = None
+    bank_name: str | None = None
+    bank_ifsc: str | None = None
+    upi_id: str | None = None
+
+    # Step completion control
+    mark_complete: bool = False  # Only mark profile_completed=True when all steps done
+
 
 class ArtistResponse(BaseModel):
     id: UUID
@@ -190,6 +213,26 @@ class ArtistResponse(BaseModel):
     landmark: str | None = None
     pincode: str | None = None
     state: str | None = None
+
+    # Booking Preferences
+    booking_mode: str | None = None
+    skills: list | None = None
+    event_types: list | None = None
+    service_location: str | None = None
+    travel_willingness: list | None = None
+    studio_address: str | None = None
+    working_hours: str | None = None
+
+    # Portfolio
+    portfolio: list | None = None
+
+    # Bank Details
+    bank_account_name: str | None = None
+    bank_account_number: str | None = None
+    bank_name: str | None = None
+    bank_ifsc: str | None = None
+    upi_id: str | None = None
+    bank_verified: bool | None = None
 
     class Config:
         from_attributes = True

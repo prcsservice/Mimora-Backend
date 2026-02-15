@@ -84,6 +84,15 @@ class Artist(Base):
     how_did_you_learn = Column(String, nullable=True)  # "professional" | "self-learned" | "apprentice"
     certificate_url = Column(String, nullable=True)  # Certificate image URL
 
+    # Booking Preferences (Step 2)
+    booking_mode = Column(String, nullable=True)  # 'instant' | 'flexi' | 'both'
+    skills = Column(ARRAY(String), default=list)  # ['HD Makeup', 'Airbrush', ...]
+    event_types = Column(ARRAY(String), default=list)  # ['Wedding', 'Engagement', ...]
+    service_location = Column(String, nullable=True)  # 'client' | 'studio' | 'both'
+    travel_willingness = Column(ARRAY(String), default=list)  # ['within-city', ...]
+    studio_address = Column(Text, nullable=True)  # JSON string of studio address
+    working_hours = Column(Text, nullable=True)  # JSON string of working hours
+
     # Location Details
     city = Column(String, nullable=True)
     address = Column(String, nullable=True)
@@ -104,6 +113,13 @@ class Artist(Base):
 
     # Portfolio
     portfolio = Column(ARRAY(String), default=list)  # Array of image URLs
+
+    # Bank Details (Step 4)
+    bank_account_name = Column(String, nullable=True)
+    bank_account_number = Column(String, nullable=True)
+    bank_name = Column(String, nullable=True)
+    bank_ifsc = Column(String, nullable=True)
+    upi_id = Column(String, nullable=True)
 
     # Stats and Ratings
     rating = Column(Float, default=0.0)

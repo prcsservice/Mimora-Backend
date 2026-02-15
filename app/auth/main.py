@@ -9,6 +9,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 import threading
 import os
+import httpx
 
 # Initialize rate limiter
 # Uses client IP address for rate limiting
@@ -24,7 +25,13 @@ origins = [
     "https://www.yourdomain.com", # Production frontend with www
 ]
 
-# Add CORS middleware FIRST (outermost) so preflight requests are handled
+# Add rate limiter FIRST (will be innermost middleware)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+# Add CORS middleware LAST (outermost) so preflight OPTIONS requests are handled
+# before any other middleware can reject them
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,           # Allowed origins
@@ -32,11 +39,6 @@ app.add_middleware(
     allow_methods=["*"],             # Allow all HTTP methods (GET, POST, etc.)
     allow_headers=["*"],             # Allow all headers
 )
-
-# Add rate limiter to app state and middleware
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_middleware(SlowAPIMiddleware)
 
 @app.on_event("startup")
 def on_startup():
@@ -55,4 +57,32 @@ app.include_router(auth_router)
 app.include_router(artist_router)
 
 
-
+# ============ Reverse Geocoding Proxy ============
+# Proxies Nominatim requests server-side to avoid browser CORS restrictions
+@app.get("/geocode/reverse")
+@limiter.limit("30/minute")
+async def reverse_geocode(request: Request, lat: float, lon: float):
+    """Proxy reverse geocoding via Nominatim (server-side, no CORS issues)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={
+                    "lat": lat,
+                    "lon": lon,
+                    "format": "json",
+                    "addressdetails": 1,
+                },
+                headers={
+                    "Accept-Language": "en",
+                    "User-Agent": "Mimora/1.0",  # Nominatim requires a User-Agent
+                },
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"Geocoding service unavailable: {str(e)}"}
+        )
