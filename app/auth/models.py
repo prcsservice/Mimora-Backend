@@ -181,7 +181,7 @@ class KYCRequest(Base):
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
 
     def __repr__(self):
         return f"<KYCRequest(id={self.id}, artist_id={self.artist_id}, status={self.status})>"

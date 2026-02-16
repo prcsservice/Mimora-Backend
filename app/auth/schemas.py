@@ -115,6 +115,10 @@ class ArtistCreate(BaseModel):
     class Config:
         populate_by_name = True 
 
+class EmailArtistOTPRequest(BaseModel):
+    email: EmailStr
+    username: str
+
 
 class ArtistVerifyOTPRequest(BaseModel):
     email: EmailStr

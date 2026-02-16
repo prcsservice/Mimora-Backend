@@ -3,6 +3,7 @@ Complete Backend KYC Implementation - Routes
 app/auth/routes.py
 """
 
+import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from sqlalchemy.orm import Session
@@ -12,6 +13,8 @@ import os
 import hmac
 import hashlib
 import json
+
+logger = logging.getLogger(__name__)
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from app.auth.database import get_db
@@ -20,7 +23,7 @@ from app.auth.schemas import (
     ArtistCreate, ArtistResponse, UserLocationUpdate,
     ArtistOAuthRequest, EmailSignupRequest, EmailLoginRequest,
     CheckUserRequest, ArtistVerifyOTPRequest, OTPRequest,
-    ArtistProfileCompleteRequest
+    ArtistProfileCompleteRequest,EmailArtistOTPRequest
 )
 from app.auth.firebase import verify_firebase_token
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
@@ -531,7 +534,7 @@ async def complete_artist_profile(
 @limiter.limit("5/minute")  # Strict limit to prevent OTP spam
 async def email_signup(
     request: Request,
-    payload: EmailSignupRequest,
+    payload: EmailArtistOTPRequest,
     db: Session = Depends(get_db)
 ):
 
@@ -699,6 +702,7 @@ async def email_login(
 @router.post("/kyc/start/{artist_id}")
 async def start_kyc(
     artist_id: str,
+    current_artist: Artist = Depends(get_current_artist),
     db: Session = Depends(get_db)
 ):
     """
@@ -752,28 +756,25 @@ async def start_kyc(
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Meon SSO KYC Route API for Aadhar/PAN verification
-            # Endpoint: POST https://ipo.meon.co.in/get_sso_kyc_route
-            base_url = os.getenv('MEON_API_BASE_URL', 'https://live.meon.co.in/get_sso_route')
+            base_url = os.getenv('MEON_API_BASE_URL', 'https://live.meon.co.in')
+            redirect_url = os.getenv('MEON_REDIRECT_URL', 'https://www.google.com')
             
             # Build request body per Meon documentation for analyst workflow
             request_body = {
                 "company": os.getenv('MEON_COMPANY_NAME', 'mimora'),
                 "workflowName": os.getenv('MEON_KYC_WORKFLOW_NAME', 'analyst'),
-                "notification": True,
                 "secret_key": os.getenv('MEON_SECRET_KEY'),
+                "notification": True,               
                 "unique_keys": {
                     "artist_id": str(artist.id),
                     "reference_id": str(kyc_request.id)
                 },
-                "is_redirect" : True,
-                "redirect_url" : "https://www.google.com",
-
-                
+                "is_redirect": True,
+                "redirect_url": redirect_url,
             }
             
             meon_url = f"{base_url}/get_sso_kyc_route"
-            print(f"DEBUG - Calling Meon SSO KYC API: {meon_url}")
-            print(f"DEBUG - Request body: {request_body}")
+            logger.info(f"Calling Meon SSO KYC API: {meon_url}")
             
             response = await client.post(
                 meon_url,
@@ -781,8 +782,7 @@ async def start_kyc(
                 json=request_body
             )
             
-            print(f"DEBUG - Meon response status: {response.status_code}")
-            print(f"DEBUG - Meon response body: {response.text}")
+            logger.info(f"Meon response status: {response.status_code}")
             
             if response.status_code in [200, 201]:
                 try:
@@ -794,7 +794,7 @@ async def start_kyc(
                     
                     meon_data = response.json()
                 except json.JSONDecodeError:
-                    print(f"DEBUG - Failed to parse JSON response: {response.text}")
+                    logger.error(f"Failed to parse JSON response: {response.text}")
                     raise HTTPException(
                         status_code=500,
                         detail=f"Invalid response from Meon API: {response.text[:100]}"
@@ -803,7 +803,7 @@ async def start_kyc(
                 # Check for API-level errors
                 if meon_data.get("success") == False or meon_data.get("status") == False:
                     error_msg = meon_data.get("msg") or meon_data.get("message") or "Unknown error from Meon API"
-                    print(f"DEBUG - Meon API error: {error_msg}")
+                    logger.error(f"Meon API error: {error_msg}")
                     raise HTTPException(
                         status_code=502,
                         detail=f"Meon API error: {error_msg}"
@@ -818,7 +818,7 @@ async def start_kyc(
                          meon_data.get("kyc_id") or meon_data.get("session_id"))
                 
                 if not kyc_url:
-                    print(f"DEBUG - Full Meon response: {meon_data}")
+                    logger.warning(f"Meon response missing SSO URL: {meon_data}")
                     raise HTTPException(
                         status_code=500,
                         detail=f"Meon API response missing SSO URL. Response: {meon_data}"
@@ -839,7 +839,7 @@ async def start_kyc(
                     "message": "KYC initiated successfully. Redirect user to kyc_url"
                 }
             else:
-                print(f"DEBUG - Meon API error response: {response.text}")
+                logger.error(f"Meon API error response: {response.text}")
                 raise HTTPException(
                     status_code=502,
                     detail=f"Meon API error ({response.status_code}): {response.text[:200]}"
@@ -852,13 +852,14 @@ async def start_kyc(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"KYC initiation error: {str(e)}")
+        logger.exception(f"KYC initiation error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to initiate KYC. Please try again later.")
 
 
 @router.post("/kyc/face/{artist_id}")
 async def start_face_verification(
     artist_id: str,
+    current_artist: Artist = Depends(get_current_artist),
     db: Session = Depends(get_db)
 ):
     """
@@ -887,7 +888,7 @@ async def start_face_verification(
     # Get the existing KYC request
     kyc_request = db.query(KYCRequest).filter(
         KYCRequest.artist_id == artist.id,
-        KYCRequest.status.in_(["document_verified", "in_progress"])
+        KYCRequest.status.in_(["document_verified", "face_verification_pending"])
     ).order_by(KYCRequest.created_at.desc()).first()
     
     if not kyc_request:
@@ -916,15 +917,15 @@ async def start_face_verification(
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Meon SSO KYC Route API for face/liveness verification
-            # Endpoint: POST https://ipo.meon.co.in/get_sso_kyc_route
-            base_url = os.getenv('MEON_API_BASE_URL', 'https://live.meon.co.in/get_sso_route')
+            base_url = os.getenv('MEON_API_BASE_URL', 'https://live.meon.co.in')
+            redirect_url = os.getenv('MEON_REDIRECT_URL', 'https://www.google.com')
             
             # Build request body for liveimage workflow
             request_body = {
                 "company": os.getenv('MEON_COMPANY_NAME', 'mimora'),
                 "workflowName": os.getenv('MEON_FACE_WORKFLOW_NAME', 'image_verification'),
-                "notification": True,
                 "secret_key": os.getenv('MEON_SECRET_KEY'),
+                "notification": True,        
                 "additional_info": {
                     "image_captured": ""  # Will be captured by Meon's flow
                 },
@@ -932,13 +933,12 @@ async def start_face_verification(
                     "artist_id": str(artist.id),
                     "reference_id": str(kyc_request.id)
                 },
-                "is_redirect" : True,
-                "redirect_url" : "https://www.google.com",
+                "is_redirect": True,
+                "redirect_url": redirect_url,
             }
             
             meon_url = f"{base_url}/get_sso_kyc_route"
-            print(f"DEBUG - Calling Meon Face Verification API: {meon_url}")
-            print(f"DEBUG - Request body: {request_body}")
+            logger.info(f"Calling Meon Face Verification API: {meon_url}")
             
             response = await client.post(
                 meon_url,
@@ -946,8 +946,7 @@ async def start_face_verification(
                 json=request_body
             )
             
-            print(f"DEBUG - Meon response status: {response.status_code}")
-            print(f"DEBUG - Meon response body: {response.text}")
+            logger.info(f"Meon face response status: {response.status_code}")
             
             if response.status_code in [200, 201]:
                 try:
@@ -959,7 +958,7 @@ async def start_face_verification(
                     
                     meon_data = response.json()
                 except json.JSONDecodeError:
-                    print(f"DEBUG - Failed to parse JSON response: {response.text}")
+                    logger.error(f"Failed to parse face verification JSON: {response.text}")
                     raise HTTPException(
                         status_code=500,
                         detail=f"Invalid response from Meon API: {response.text[:100]}"
@@ -968,7 +967,7 @@ async def start_face_verification(
                 # Check for API-level errors
                 if meon_data.get("success") == False or meon_data.get("status") == False:
                     error_msg = meon_data.get("msg") or meon_data.get("message") or "Unknown error from Meon API"
-                    print(f"DEBUG - Meon API error: {error_msg}")
+                    logger.error(f"Meon face API error: {error_msg}")
                     raise HTTPException(
                         status_code=502,
                         detail=f"Meon API error: {error_msg}"
@@ -980,7 +979,7 @@ async def start_face_verification(
                           meon_data.get("data", {}).get("url"))
                 
                 if not face_url:
-                    print(f"DEBUG - Full Meon response: {meon_data}")
+                    logger.warning(f"Meon face response missing SSO URL: {meon_data}")
                     raise HTTPException(
                         status_code=500,
                         detail=f"Meon API response missing SSO URL. Response: {meon_data}"
@@ -998,7 +997,7 @@ async def start_face_verification(
                     "message": "Face verification initiated. Redirect user to face_url"
                 }
             else:
-                print(f"DEBUG - Meon API error response: {response.text}")
+                logger.error(f"Meon face API error response: {response.text}")
                 raise HTTPException(
                     status_code=502,
                     detail=f"Meon API error ({response.status_code}): {response.text[:200]}"
@@ -1011,7 +1010,7 @@ async def start_face_verification(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Face verification initiation error: {str(e)}")
+        logger.exception(f"Face verification initiation error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to initiate face verification. Please try again later.")
 
 
@@ -1050,21 +1049,24 @@ async def kyc_webhook(
     }
     """
     
-    # Log incoming webhook for debugging
-    print(f"=== KYC WEBHOOK RECEIVED ===")
-    print(f"Payload: {json.dumps(payload, indent=2, default=str)}")
-    print(f"Signature: {x_meon_signature}")
+    # Log incoming webhook
+    logger.info("KYC webhook received")
     
-    # Verify webhook signature for security (if configured)
-    if x_meon_signature and os.getenv('MEON_WEBHOOK_SECRET'):
+    # Verify webhook signature for security
+    webhook_secret = os.getenv('MEON_WEBHOOK_SECRET')
+    if webhook_secret:
+        if not x_meon_signature:
+            logger.error("Missing webhook signature header")
+            raise HTTPException(status_code=403, detail="Missing webhook signature")
+        
         expected_signature = hmac.HMAC(
-            os.getenv('MEON_WEBHOOK_SECRET').encode(),
+            webhook_secret.encode(),
             json.dumps(payload, sort_keys=True).encode(),
             hashlib.sha256
         ).hexdigest()
         
         if not hmac.compare_digest(expected_signature, x_meon_signature):
-            print(f"ERROR - Invalid webhook signature")
+            logger.error("Invalid webhook signature")
             raise HTTPException(status_code=403, detail="Invalid webhook signature")
     
     # Extract KYC ID from various possible field names
@@ -1099,7 +1101,7 @@ async def kyc_webhook(
             pass
     
     if not kyc_request:
-        print(f"ERROR - KYC request not found for kyc_id: {kyc_id}, reference_id: {reference_id}")
+        logger.error(f"KYC request not found for kyc_id: {kyc_id}, reference_id: {reference_id}")
         raise HTTPException(
             status_code=404,
             detail=f"KYC request not found. kyc_id: {kyc_id}, reference_id: {reference_id}"
@@ -1108,7 +1110,7 @@ async def kyc_webhook(
     # Find associated artist
     artist = db.query(Artist).filter(Artist.id == kyc_request.artist_id).first()
     if not artist:
-        print(f"ERROR - Artist not found for KYC request: {kyc_request.id}")
+        logger.error(f"Artist not found for KYC request: {kyc_request.id}")
         raise HTTPException(status_code=404, detail="Artist not found")
     
     # Extract status and verification type
@@ -1128,7 +1130,7 @@ async def kyc_webhook(
     # Extract verification data
     verification_data = payload.get("data", {}) or payload.get("verification_details", {}) or {}
     
-    print(f"Processing: status={status}, type={verification_type}, artist={artist.id}")
+    logger.info(f"Processing webhook: status={status}, type={verification_type}, artist={artist.id}")
     
     # Store the full payload for records
     existing_data = {}
@@ -1160,7 +1162,7 @@ async def kyc_webhook(
             kyc_request.document_verified = True
             kyc_request.current_step = "face"
             kyc_request.status = "document_verified"
-            print(f"Document verification complete for artist {artist.id} - Ready for face verification")
+            logger.info(f"Document verification complete for artist {artist.id} - Ready for face verification")
             
         elif verification_type in ["face", "liveness", "selfie", "photo", "liveimage"]:
             # Step 2 complete: Face verified - Full KYC complete!
@@ -1168,7 +1170,7 @@ async def kyc_webhook(
             kyc_request.current_step = "complete"
             kyc_request.status = "verified"
             artist.kyc_verified = True
-            print(f"Face verification complete - KYC VERIFIED for artist {artist.id}")
+            logger.info(f"Face verification complete - KYC VERIFIED for artist {artist.id}")
             
         elif verification_type in ["complete", "all", "full"]:
             # Full workflow completed in one callback
@@ -1177,17 +1179,17 @@ async def kyc_webhook(
             kyc_request.current_step = "complete"
             kyc_request.status = "verified"
             artist.kyc_verified = True
-            print(f"Full KYC VERIFIED for artist {artist.id}")
+            logger.info(f"Full KYC VERIFIED for artist {artist.id}")
             
     elif status in ["failed", "rejected", "error"]:
         kyc_request.status = "failed"
         artist.kyc_verified = False
-        print(f"Verification FAILED for artist {artist.id}: {verification_type}")
+        logger.warning(f"Verification FAILED for artist {artist.id}: {verification_type}")
     
     else:
         # Status is pending or in_progress
         kyc_request.status = "in_progress"
-        print(f"Verification in progress for artist {artist.id}")
+        logger.info(f"Verification in progress for artist {artist.id}")
     
     # Update provider_kyc_id if we got a new one
     if kyc_id and not kyc_request.provider_kyc_id:
@@ -1196,9 +1198,7 @@ async def kyc_webhook(
     
     db.commit()
     
-    print(f"=== WEBHOOK PROCESSED ===")
-    print(f"Artist: {artist.id}, KYC Status: {kyc_request.status}, KYC Verified: {artist.kyc_verified}")
-    print(f"Document Verified: {kyc_request.document_verified}, Face Verified: {kyc_request.face_verified}")
+    logger.info(f"Webhook processed: artist={artist.id}, status={kyc_request.status}, verified={artist.kyc_verified}")
     
     return {
         "success": True,
@@ -1215,6 +1215,7 @@ async def kyc_webhook(
 @router.get("/kyc/status/{artist_id}")
 async def get_kyc_status(
     artist_id: str,
+    current_artist: Artist = Depends(get_current_artist),
     db: Session = Depends(get_db)
 ):
     """
@@ -1262,6 +1263,7 @@ async def get_kyc_status(
 @router.post("/kyc/retry/{artist_id}")
 async def retry_kyc(
     artist_id: str,
+    current_artist: Artist = Depends(get_current_artist),
     db: Session = Depends(get_db)
 ):
     """
@@ -1282,15 +1284,14 @@ async def retry_kyc(
         KYCRequest.status.in_(["pending", "in_progress", "failed"])
     ).update({"status": "cancelled"})
     
-    # Reset artist KYC status
+    # Reset artist KYC status (only KYC, not bank verification)
     artist.kyc_verified = False
-    artist.bank_verified = False
     artist.kyc_id = None
     
     db.commit()
     
     # Initiate new KYC (reuse start_kyc logic)
-    return await start_kyc(artist_id, db)
+    return await start_kyc(artist_id, current_artist, db)
 
 
 # Add this temporary debugging function at the top of the file
