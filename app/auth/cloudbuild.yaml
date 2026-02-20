@@ -20,25 +20,6 @@ steps:
       - |
         docker push gcr.io/$PROJECT_ID/mimora-auth:latest
 
-  # Deploy to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args:
-      - 'run'
-      - 'deploy'
-      - 'mimora-auth'
-      - '--image'
-      - 'gcr.io/$PROJECT_ID/mimora-auth:latest'
-      - '--region'
-      - 'asia-south1'
-      - '--platform'
-      - 'managed'
-      - '--allow-unauthenticated'
-      - '--add-cloudsql-instances'
-      - 'fixforward-dev:asia-south1:mimoradev'
-      - '--set-env-vars'
-      - 'ENV=production'
-
 images:
   - 'gcr.io/$PROJECT_ID/mimora-auth:latest'
 

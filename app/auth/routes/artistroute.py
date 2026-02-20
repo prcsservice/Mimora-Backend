@@ -1016,81 +1016,78 @@ async def start_face_verification(
 
 @router.post("/kyc/webhook")
 async def kyc_webhook(
-    payload: dict,
+    request: Request,
     x_meon_signature: str = Header(None),
     db: Session = Depends(get_db)
 ):
     """
     Webhook endpoint for Meon to send KYC verification results.
     
-    This handles the two-step verification flow:
-    1. First callback: Aadhaar OR PAN verification complete
-    2. Second callback: Face verification complete
-    
-    Expected payload structure (may vary based on Meon's workflow):
-    {
-        "request_id": "xxx" or "kyc_id": "xxx",
-        "status": "success" | "failed" | "pending",
-        "step": "aadhaar" | "pan" | "face" | "complete",
-        "verification_type": "aadhaar" | "pan" | "face",
-        "data": {
-            "name": "...",
-            "dob": "...",
-            "aadhaar_number": "XXXX-XXXX-1234",
-            ...
-        },
-        "unique_keys": {
-            "mobile": "..."
-        },
-        "additional_info": {
-            "artist_id": "...",
-            "reference_id": "..."
-        }
-    }
+    Meon sends a FLAT JSON payload with fields like:
+    - current_stepname: "esign14" (indicates which step was completed)
+    - aadhar_name, aadhar_no, aadhar_dob: Aadhaar verification data
+    - pan_number: PAN verification data  
+    - esign_transaction_id, digitrans, clienttoken: Transaction identifiers
+    - account_number, ifsc: Bank details
+    - email, dob, mobile_number: User info
+    - Esigned_PDF-_equity, PDF-_equity: Document URLs
+    - liveimage_timestamp: Face verification timestamp
+    - clientimage: Face image URL
     """
     
-    # Log incoming webhook
-    logger.info("KYC webhook received")
+    # Read raw body
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        logger.error(f"Invalid JSON in webhook payload: {raw_body[:200]}")
+        return {"success": False, "message": "Invalid JSON payload", "acknowledged": True}
     
-    # Verify webhook signature for security
+    # Log incoming webhook payload for debugging
+    logger.info(f"KYC webhook received: {json.dumps(payload, default=str)}")
+    
+    # Optional signature verification (if configured)
     webhook_secret = os.getenv('MEON_WEBHOOK_SECRET')
-    if webhook_secret:
-        if not x_meon_signature:
-            logger.error("Missing webhook signature header")
-            raise HTTPException(status_code=403, detail="Missing webhook signature")
-        
-        expected_signature = hmac.HMAC(
+    if webhook_secret and x_meon_signature:
+        expected_signature = hmac.new(
             webhook_secret.encode(),
-            json.dumps(payload, sort_keys=True).encode(),
+            raw_body,
             hashlib.sha256
         ).hexdigest()
         
         if not hmac.compare_digest(expected_signature, x_meon_signature):
             logger.error("Invalid webhook signature")
             raise HTTPException(status_code=403, detail="Invalid webhook signature")
+        logger.info("Webhook signature verified successfully")
+    else:
+        logger.warning("Webhook signature verification skipped (no secret configured or no signature sent)")
     
-    # Extract KYC ID from various possible field names
+    # ---- Extract identifiers from Meon's flat payload ----
+    # Meon uses digitrans/clienttoken as transaction identifiers
     kyc_id = (
+        payload.get("digitrans") or 
+        payload.get("clienttoken") or
+        payload.get("esign_transaction_id") or
         payload.get("request_id") or 
-        payload.get("kyc_id") or 
-        payload.get("id") or
-        payload.get("session_id") or
-        payload.get("transaction_id")
+        payload.get("kyc_id")
     )
     
-    # Extract reference from additional_info if present
-    additional_info = payload.get("additional_info", {})
-    reference_id = additional_info.get("reference_id")
-    artist_id_from_payload = additional_info.get("artist_id")
+    # Try to find artist_id and reference_id from unique_keys (if Meon echoes them back)
+    # or from additional_info
+    unique_keys = payload.get("unique_keys", {}) or payload.get("additional_info", {}) or {}
+    reference_id = unique_keys.get("reference_id")
+    artist_id_from_payload = unique_keys.get("artist_id")
     
-    # Try to find KYC request by various methods
+    # ---- Find KYC request ----
     kyc_request = None
     
+    # Method 1: By provider_kyc_id (digitrans/clienttoken)
     if kyc_id:
         kyc_request = db.query(KYCRequest).filter(
             KYCRequest.provider_kyc_id == kyc_id
         ).first()
     
+    # Method 2: By reference_id (our KYC request UUID)
     if not kyc_request and reference_id:
         try:
             ref_uuid = uuid.UUID(reference_id)
@@ -1100,99 +1097,135 @@ async def kyc_webhook(
         except ValueError:
             pass
     
+    # Method 3: By artist_id (latest active KYC request)
+    if not kyc_request and artist_id_from_payload:
+        try:
+            artist_uuid = uuid.UUID(artist_id_from_payload)
+            kyc_request = db.query(KYCRequest).filter(
+                KYCRequest.artist_id == artist_uuid,
+                KYCRequest.status.in_(["pending", "in_progress", "document_verified", "face_verification_pending"])
+            ).order_by(KYCRequest.created_at.desc()).first()
+        except ValueError:
+            pass
+    
+    # Method 4: Try matching by email if we have it in the payload
+    if not kyc_request and payload.get("email"):
+        artist_by_email = db.query(Artist).filter(
+            Artist.email == payload.get("email")
+        ).first()
+        if artist_by_email:
+            kyc_request = db.query(KYCRequest).filter(
+                KYCRequest.artist_id == artist_by_email.id,
+                KYCRequest.status.in_(["pending", "in_progress", "document_verified", "face_verification_pending"])
+            ).order_by(KYCRequest.created_at.desc()).first()
+    
     if not kyc_request:
-        logger.error(f"KYC request not found for kyc_id: {kyc_id}, reference_id: {reference_id}")
-        raise HTTPException(
-            status_code=404,
-            detail=f"KYC request not found. kyc_id: {kyc_id}, reference_id: {reference_id}"
-        )
+        logger.warning(f"KYC request not found. kyc_id={kyc_id}, reference_id={reference_id}, email={payload.get('email')}")
+        return {"success": False, "message": "KYC request not found", "acknowledged": True}
     
     # Find associated artist
     artist = db.query(Artist).filter(Artist.id == kyc_request.artist_id).first()
     if not artist:
         logger.error(f"Artist not found for KYC request: {kyc_request.id}")
-        raise HTTPException(status_code=404, detail="Artist not found")
+        return {"success": False, "message": "Artist not found", "acknowledged": True}
     
-    # Extract status and verification type
-    status = (
-        payload.get("status") or 
-        payload.get("verification_status") or
-        "pending"
-    ).lower()
+    # ---- Determine verification status from Meon's flat payload ----
+    current_step = payload.get("current_stepname", "")
+    aadhar_name = payload.get("aadhar_name")
+    aadhar_no = payload.get("aadhar_no")
+    pan_number = payload.get("pan_number")
+    esign_tx_id = payload.get("esign_transaction_id")
+    liveimage_timestamp = payload.get("liveimage_timestamp")
+    client_image = payload.get("clientimage")
+    esigned_pdf = payload.get("Esigned_PDF-_equity")
     
-    verification_type = (
-        payload.get("verification_type") or 
-        payload.get("step") or 
-        payload.get("type") or
-        "unknown"
-    ).lower()
+    logger.info(f"Processing Meon webhook: current_step={current_step}, aadhar_name={aadhar_name}, artist={artist.id}")
     
-    # Extract verification data
-    verification_data = payload.get("data", {}) or payload.get("verification_details", {}) or {}
-    
-    logger.info(f"Processing webhook: status={status}, type={verification_type}, artist={artist.id}")
-    
-    # Store the full payload for records
+    # Store the full Meon payload for records
     existing_data = {}
     if kyc_request.verification_data:
         try:
             existing_data = json.loads(kyc_request.verification_data)
-        except:
+        except (json.JSONDecodeError, TypeError):
             existing_data = {}
     
-    # Add this verification to the history
-    if "verifications" not in existing_data:
-        existing_data["verifications"] = []
+    # Add this webhook callback to history
+    if "webhooks" not in existing_data:
+        existing_data["webhooks"] = []
     
-    existing_data["verifications"].append({
-        "type": verification_type,
-        "status": status,
+    existing_data["webhooks"].append({
         "timestamp": datetime.utcnow().isoformat(),
-        "data": verification_data
+        "current_stepname": current_step,
+        "payload": payload
     })
-    existing_data["last_update"] = payload
+    existing_data["last_payload"] = payload
     
-    kyc_request.verification_data = json.dumps(existing_data)
+    # Store extracted KYC details for easy access
+    existing_data["kyc_details"] = {
+        "aadhar_name": aadhar_name,
+        "aadhar_no": aadhar_no,
+        "aadhar_dob": payload.get("aadhar_dob"),
+        "aadhar_address": payload.get("aadhar_address"),
+        "aadhar_gender": payload.get("aadhar_gender"),
+        "pan_number": pan_number,
+        "email": payload.get("email"),
+        "dob": payload.get("dob"),
+        "account_number": payload.get("account_number"),
+        "ifsc": payload.get("ifsc"),
+        "bank_address": payload.get("bank_address"),
+        "esign_transaction_id": esign_tx_id,
+        "current_stepname": current_step,
+    }
+    
+    kyc_request.verification_data = json.dumps(existing_data, default=str)
     kyc_request.updated_at = datetime.utcnow()
     
-    # Update verification status based on the step
-    if status in ["success", "verified", "completed", "complete"]:
-        if verification_type in ["aadhaar", "pan", "document", "id", "analyst"]:
-            # Step 1 complete: Aadhaar or PAN verified
-            kyc_request.document_verified = True
-            kyc_request.current_step = "face"
-            kyc_request.status = "document_verified"
-            logger.info(f"Document verification complete for artist {artist.id} - Ready for face verification")
-            
-        elif verification_type in ["face", "liveness", "selfie", "photo", "liveimage"]:
-            # Step 2 complete: Face verified - Full KYC complete!
-            kyc_request.face_verified = True
-            kyc_request.current_step = "complete"
-            kyc_request.status = "verified"
-            artist.kyc_verified = True
-            logger.info(f"Face verification complete - KYC VERIFIED for artist {artist.id}")
-            
-        elif verification_type in ["complete", "all", "full"]:
-            # Full workflow completed in one callback
-            kyc_request.document_verified = True
-            kyc_request.face_verified = True
-            kyc_request.current_step = "complete"
-            kyc_request.status = "verified"
-            artist.kyc_verified = True
-            logger.info(f"Full KYC VERIFIED for artist {artist.id}")
-            
-    elif status in ["failed", "rejected", "error"]:
-        kyc_request.status = "failed"
-        artist.kyc_verified = False
-        logger.warning(f"Verification FAILED for artist {artist.id}: {verification_type}")
+    # ---- Determine KYC status from Meon's data ----
+    # Meon's current_stepname indicates progress. "esign14" means e-sign step completed.
+    # We check what data is present to determine verification status.
     
+    # Check if Aadhaar is verified (has aadhar_name and aadhar_no)
+    aadhaar_verified = bool(aadhar_name and aadhar_no)
+    
+    # Check if face/liveness is done (has liveimage_timestamp or clientimage)
+    face_done = bool(liveimage_timestamp or client_image)
+    
+    # Check if e-sign is done (has esign_transaction_id or esigned PDF)
+    esign_done = bool(esign_tx_id or esigned_pdf)
+    
+    # Update KYC request based on what Meon has verified
+    if aadhaar_verified:
+        kyc_request.document_verified = True
+        logger.info(f"Aadhaar verified for artist {artist.id}: {aadhar_name}")
+    
+    if face_done:
+        kyc_request.face_verified = True
+        logger.info(f"Face/liveness verified for artist {artist.id}")
+    
+    # Determine overall KYC status
+    if aadhaar_verified and face_done and esign_done:
+        # Full KYC flow completed
+        kyc_request.current_step = "complete"
+        kyc_request.status = "verified"
+        artist.kyc_verified = True
+        logger.info(f"Full KYC VERIFIED for artist {artist.id}")
+    elif aadhaar_verified and face_done:
+        # Document + Face done, waiting for e-sign
+        kyc_request.current_step = "esign"
+        kyc_request.status = "document_verified"
+        logger.info(f"Document + Face verified for artist {artist.id}, awaiting e-sign")
+    elif aadhaar_verified:
+        # Only document verified
+        kyc_request.current_step = "face"
+        kyc_request.status = "document_verified"
+        logger.info(f"Document verified for artist {artist.id}, awaiting face verification")
     else:
-        # Status is pending or in_progress
+        # Still in progress
         kyc_request.status = "in_progress"
-        logger.info(f"Verification in progress for artist {artist.id}")
+        logger.info(f"KYC in progress for artist {artist.id}, step: {current_step}")
     
-    # Update provider_kyc_id if we got a new one
-    if kyc_id and not kyc_request.provider_kyc_id:
+    # Update provider_kyc_id
+    if kyc_id:
         kyc_request.provider_kyc_id = kyc_id
         artist.kyc_id = kyc_id
     
@@ -1202,13 +1235,9 @@ async def kyc_webhook(
     
     return {
         "success": True,
-        "message": f"Webhook processed: {verification_type} - {status}",
-        "artist_id": str(artist.id),
+        "message": "Webhook processed successfully",
         "kyc_status": kyc_request.status,
-        "kyc_verified": artist.kyc_verified,
-        "document_verified": kyc_request.document_verified,
-        "face_verified": kyc_request.face_verified,
-        "current_step": kyc_request.current_step
+        "kyc_verified": artist.kyc_verified
     }
 
 
@@ -1254,7 +1283,7 @@ async def get_kyc_status(
             verification_data = json.loads(kyc_request.verification_data)
             response["verification_details"] = verification_data.get("verification_details", {})
             response["last_updated"] = kyc_request.updated_at.isoformat()
-        except:
+        except (json.JSONDecodeError, TypeError, AttributeError):
             pass
     
     return response
@@ -1293,69 +1322,6 @@ async def retry_kyc(
     # Initiate new KYC (reuse start_kyc logic)
     return await start_kyc(artist_id, current_artist, db)
 
-
-# Add this temporary debugging function at the top of the file
-async def test_meon_endpoints():
-    """
-    Test various possible Meon API endpoints to find the correct one
-    """
-    import httpx
-    
-    possible_endpoints = [
-        "/kyc/start",
-        "/kyc/initiate", 
-        "/kyc/init",
-        "/verify/start",
-        "/verify/initiate",
-        "/verify/init",
-        "/api/kyc/start",
-        "/api/verify/initiate",
-        "/start",
-        "/initiate",
-        ""  # Just base URL
-    ]
-    
-    base_url = os.getenv('MEON_API_BASE_URL', 'https://kyc.meon.co.in/api')
-    api_key = os.getenv('MEON_API_KEY')
-    
-    print(f"\n=== Testing Meon API Endpoints ===")
-    print(f"Base URL: {base_url}")
-    print(f"API Key: {api_key[:20] if api_key else 'NOT SET'}...")
-    print("=" * 50)
-    
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for endpoint in possible_endpoints:
-            full_url = f"{base_url}{endpoint}"
-            try:
-                # Try GET first
-                response = await client.get(
-                    full_url,
-                    headers={"Authorization": f"Bearer {api_key}"}
-                )
-                print(f"GET {endpoint}: {response.status_code}")
-                
-                # Try POST
-                response = await client.post(
-                    full_url,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json={"test": "data"}
-                )
-                print(f"POST {endpoint}: {response.status_code}")
-            except Exception as e:
-                print(f"{endpoint}: ERROR - {str(e)}")
-    
-    print("=" * 50 + "\n")
-
-
-# Add this route to test endpoints
-@router.get("/kyc/test-endpoints")
-async def test_endpoints():
-    """Temporary endpoint to test Meon API endpoints"""
-    await test_meon_endpoints()
-    return {"message": "Check server logs for endpoint test results"}
 
 
 # ============ PROFILE COMPLETION ENDPOINT ============

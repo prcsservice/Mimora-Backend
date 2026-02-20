@@ -11,9 +11,16 @@ import threading
 import os
 import httpx
 
+# Function to get the real user IP behind a proxy (Cloud Run / Load Balancer)
+def get_real_user_ip(request: Request):
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0]
+    return request.client.host
+
 # Initialize rate limiter
-# Uses client IP address for rate limiting
-limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+# Uses client IP address for rate limiting (proxy-aware)
+limiter = Limiter(key_func=get_real_user_ip, default_limits=["100/minute"])
 
 app = FastAPI(title="Mimora Auth Service")
 
@@ -21,8 +28,7 @@ app = FastAPI(title="Mimora Auth Service")
 origins = [
     "http://localhost:3000",      # React dev server
     "http://localhost:5173",      # Vite dev server
-    "https://yourdomain.com",     # Production frontend
-    "https://www.yourdomain.com", # Production frontend with www
+    "https://mimora-frontend-new.vercel.app",  # Production frontend
 ]
 
 # Add rate limiter FIRST (will be innermost middleware)

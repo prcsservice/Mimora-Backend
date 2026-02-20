@@ -33,4 +33,4 @@ COPY serviceAccountKey.json ./serviceAccountKey.json
 EXPOSE 8080
 
 # Run uvicorn on the port Cloud Run provides
-CMD uvicorn app.auth.main:app --host 0.0.0.0 --port ${PORT:-8080}
+CMD uvicorn app.auth.main:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*'
