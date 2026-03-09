@@ -757,7 +757,7 @@ async def start_kyc(
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Meon SSO KYC Route API for Aadhar/PAN verification
             base_url = os.getenv('MEON_API_BASE_URL', 'https://live.meon.co.in')
-            redirect_url = os.getenv('MEON_REDIRECT_URL', 'https://www.google.com')
+            redirect_url = os.getenv('MEON_REDIRECT_URL', 'https://mimora-frontend-new.vercel.app/auth/artist/signup?kyc_return=true')
             
             # Build request body per Meon documentation for analyst workflow
             request_body = {
@@ -773,7 +773,7 @@ async def start_kyc(
                 "redirect_url": redirect_url,
             }
             
-            meon_url = f"{base_url}/get_sso_kyc_route"
+            meon_url = f"{base_url}/get_sso_route"
             logger.info(f"Calling Meon SSO KYC API: {meon_url}")
             
             response = await client.post(
@@ -859,6 +859,7 @@ async def start_kyc(
 @router.post("/kyc/face/{artist_id}")
 async def start_face_verification(
     artist_id: str,
+    request: Request,
     current_artist: Artist = Depends(get_current_artist),
     db: Session = Depends(get_db)
 ):
@@ -918,7 +919,7 @@ async def start_face_verification(
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Meon SSO KYC Route API for face/liveness verification
             base_url = os.getenv('MEON_API_BASE_URL', 'https://live.meon.co.in')
-            redirect_url = os.getenv('MEON_REDIRECT_URL', 'https://www.google.com')
+            redirect_url = os.getenv('MEON_FACE_REDIRECT_URL', os.getenv('MEON_REDIRECT_URL', 'https://mimora-frontend-new.vercel.app/auth/artist/signup?face_return=true'))
             
             # Build request body for liveimage workflow
             request_body = {
@@ -927,7 +928,7 @@ async def start_face_verification(
                 "secret_key": os.getenv('MEON_SECRET_KEY'),
                 "notification": True,        
                 "additional_info": {
-                    "image_captured": ""  # Will be captured by Meon's flow
+                    "image_captured": artist.profile_pic_url or ""  # Profile pic from Firebase
                 },
                 "unique_keys": {
                     "artist_id": str(artist.id),
@@ -937,7 +938,7 @@ async def start_face_verification(
                 "redirect_url": redirect_url,
             }
             
-            meon_url = f"{base_url}/get_sso_kyc_route"
+            meon_url = f"{base_url}/get_sso_route"
             logger.info(f"Calling Meon Face Verification API: {meon_url}")
             
             response = await client.post(
