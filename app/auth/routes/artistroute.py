@@ -700,8 +700,10 @@ async def email_login(
     return {"message": "OTP sent to your email", "email": payload.email}
 
 @router.post("/kyc/start/{artist_id}")
+@limiter.limit("5/minute")
 async def start_kyc(
     artist_id: str,
+    request: Request,
     current_artist: Artist = Depends(get_current_artist),
     db: Session = Depends(get_db)
 ):
@@ -709,15 +711,17 @@ async def start_kyc(
     Initiate KYC process with Meon
     Returns hosted KYC URL for user to complete verification
     """
-    # Validate and find artist
+    # Validate artist ID format
     try:
         artist_uuid = uuid.UUID(artist_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid artist ID format")
     
-    artist = db.query(Artist).filter(Artist.id == artist_uuid).first()
-    if not artist:
-        raise HTTPException(status_code=404, detail="Artist not found")
+    # Authorization: artist can only start their own KYC
+    if current_artist.id != artist_uuid:
+        raise HTTPException(status_code=403, detail="You can only manage your own KYC verification")
+    
+    artist = current_artist
     
     # Check if already verified
     if artist.kyc_verified:
@@ -727,30 +731,34 @@ async def start_kyc(
             "kyc_verified": True
         }
     
-    # Check for existing in-progress KYC
+    # Auto-cancel stale requests older than 24 hours
+    from datetime import timedelta
+    stale_cutoff = datetime.utcnow() - timedelta(hours=24)
+    db.query(KYCRequest).filter(
+        KYCRequest.artist_id == artist.id,
+        KYCRequest.status.in_(["pending", "in_progress"]),
+        KYCRequest.created_at < stale_cutoff
+    ).update({"status": "cancelled"})
+    db.commit()
+    
+    # Check for existing in-progress KYC (non-stale) — reuse it instead of creating duplicate
     existing_kyc = db.query(KYCRequest).filter(
         KYCRequest.artist_id == artist.id,
         KYCRequest.status.in_(["pending", "in_progress"])
     ).first()
     
-    if existing_kyc and existing_kyc.provider_kyc_id:
-        return {
-            "status": "in_progress",
-            "message": "KYC already in progress",
-            "kyc_id": existing_kyc.provider_kyc_id,
-            "kyc_url": f"https://live.meon.co.in/verify/{existing_kyc.provider_kyc_id}"
-        }
-    
-    # Create new KYC request
-    kyc_request = KYCRequest(
-        artist_id=artist.id,
-        provider="meon",
-        status="pending"
-    )
-    
-    db.add(kyc_request)
-    db.commit()
-    db.refresh(kyc_request)
+    if existing_kyc:
+        kyc_request = existing_kyc
+    else:
+        # Create new KYC request
+        kyc_request = KYCRequest(
+            artist_id=artist.id,
+            provider="meon",
+            status="pending"
+        )
+        db.add(kyc_request)
+        db.commit()
+        db.refresh(kyc_request)
     
     # Call Meon API to initiate Aadhar/PAN verification
     try:
@@ -810,9 +818,10 @@ async def start_kyc(
                     )
                 
                 # Extract SSO URL from response
-                # The response should contain the hosted KYC URL
-                kyc_url = (meon_data.get("sso_url") or meon_data.get("url") or 
-                          meon_data.get("link") or meon_data.get("redirect_url") or
+                # Prefer short_url (HTTPS) over url (HTTP) based on Meon API response format
+                kyc_url = (meon_data.get("short_url") or meon_data.get("sso_url") or 
+                          meon_data.get("url") or meon_data.get("link") or 
+                          meon_data.get("redirect_url") or
                           meon_data.get("data", {}).get("url"))
                 kyc_id = (meon_data.get("request_id") or meon_data.get("id") or 
                          meon_data.get("kyc_id") or meon_data.get("session_id"))
@@ -857,6 +866,7 @@ async def start_kyc(
 
 
 @router.post("/kyc/face/{artist_id}")
+@limiter.limit("5/minute")
 async def start_face_verification(
     artist_id: str,
     request: Request,
@@ -868,15 +878,17 @@ async def start_face_verification(
     This should be called after document verification is complete
     Returns hosted URL for user to complete face verification
     """
-    # Validate and find artist
+    # Validate artist ID format
     try:
         artist_uuid = uuid.UUID(artist_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid artist ID format")
     
-    artist = db.query(Artist).filter(Artist.id == artist_uuid).first()
-    if not artist:
-        raise HTTPException(status_code=404, detail="Artist not found")
+    # Authorization: artist can only verify their own face
+    if current_artist.id != artist_uuid:
+        raise HTTPException(status_code=403, detail="You can only manage your own KYC verification")
+    
+    artist = current_artist
     
     # Check if already fully verified
     if artist.kyc_verified:
@@ -1044,11 +1056,14 @@ async def kyc_webhook(
         logger.error(f"Invalid JSON in webhook payload: {raw_body[:200]}")
         return {"success": False, "message": "Invalid JSON payload", "acknowledged": True}
     
-    # Log incoming webhook payload for debugging
-    logger.info(f"KYC webhook received: {json.dumps(payload, default=str)}")
+    # Log incoming webhook safely (no PII)
+    safe_keys = ["current_stepname", "digitrans", "clienttoken", "esign_transaction_id"]
+    safe_log = {k: payload.get(k) for k in safe_keys if payload.get(k)}
+    logger.info(f"KYC webhook received: {json.dumps(safe_log)}")
     
-    # Optional signature verification (if configured)
+    # Signature verification (mandatory in production)
     webhook_secret = os.getenv('MEON_WEBHOOK_SECRET')
+    is_production = os.getenv("ENV", "development").lower() == "production"
     if webhook_secret and x_meon_signature:
         expected_signature = hmac.new(
             webhook_secret.encode(),
@@ -1060,8 +1075,11 @@ async def kyc_webhook(
             logger.error("Invalid webhook signature")
             raise HTTPException(status_code=403, detail="Invalid webhook signature")
         logger.info("Webhook signature verified successfully")
+    elif is_production:
+        logger.error("Webhook signature verification required in production")
+        raise HTTPException(status_code=403, detail="Missing webhook signature")
     else:
-        logger.warning("Webhook signature verification skipped (no secret configured or no signature sent)")
+        logger.warning("Webhook signature verification skipped (dev mode)")
     
     # ---- Extract identifiers from Meon's flat payload ----
     # Meon uses digitrans/clienttoken as transaction identifiers
@@ -1161,19 +1179,14 @@ async def kyc_webhook(
     })
     existing_data["last_payload"] = payload
     
-    # Store extracted KYC details for easy access
+    # Store extracted KYC details (PII masked for compliance)
     existing_data["kyc_details"] = {
         "aadhar_name": aadhar_name,
-        "aadhar_no": aadhar_no,
+        "aadhar_no": f"XXXX-XXXX-{aadhar_no[-4:]}" if aadhar_no and len(aadhar_no) >= 4 else None,
         "aadhar_dob": payload.get("aadhar_dob"),
-        "aadhar_address": payload.get("aadhar_address"),
         "aadhar_gender": payload.get("aadhar_gender"),
-        "pan_number": pan_number,
+        "pan_number": f"XXXXX{pan_number[-4:]}" if pan_number and len(pan_number) >= 4 else None,
         "email": payload.get("email"),
-        "dob": payload.get("dob"),
-        "account_number": payload.get("account_number"),
-        "ifsc": payload.get("ifsc"),
-        "bank_address": payload.get("bank_address"),
         "esign_transaction_id": esign_tx_id,
         "current_stepname": current_step,
     }
@@ -1251,15 +1264,17 @@ async def get_kyc_status(
     """
     Get current KYC verification status for an artist
     """
-    # Validate and find artist
+    # Validate artist ID format
     try:
         artist_uuid = uuid.UUID(artist_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid artist ID format")
     
-    artist = db.query(Artist).filter(Artist.id == artist_uuid).first()
-    if not artist:
-        raise HTTPException(status_code=404, detail="Artist not found")
+    # Authorization: artist can only check their own KYC status
+    if current_artist.id != artist_uuid:
+        raise HTTPException(status_code=403, detail="You can only check your own KYC status")
+    
+    artist = current_artist
     
     # Get latest KYC request
     kyc_request = db.query(KYCRequest).filter(
@@ -1291,8 +1306,10 @@ async def get_kyc_status(
 
 
 @router.post("/kyc/retry/{artist_id}")
+@limiter.limit("3/minute")
 async def retry_kyc(
     artist_id: str,
+    request: Request,
     current_artist: Artist = Depends(get_current_artist),
     db: Session = Depends(get_db)
 ):
@@ -1304,14 +1321,30 @@ async def retry_kyc(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid artist ID format")
     
-    artist = db.query(Artist).filter(Artist.id == artist_uuid).first()
-    if not artist:
-        raise HTTPException(status_code=404, detail="Artist not found")
+    # Authorization: artist can only retry their own KYC
+    if current_artist.id != artist_uuid:
+        raise HTTPException(status_code=403, detail="You can only manage your own KYC verification")
     
-    # Mark previous KYC requests as cancelled
+    artist = current_artist
+    
+    # Check retry limit (max 3 per day)
+    from datetime import timedelta
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    retry_count = db.query(KYCRequest).filter(
+        KYCRequest.artist_id == artist.id,
+        KYCRequest.created_at >= today_start
+    ).count()
+    
+    if retry_count >= 3:
+        raise HTTPException(
+            status_code=429,
+            detail="Maximum KYC verification attempts reached for today (3). Please try again tomorrow."
+        )
+    
+    # Mark ALL active KYC requests as cancelled (expanded status list)
     db.query(KYCRequest).filter(
         KYCRequest.artist_id == artist.id,
-        KYCRequest.status.in_(["pending", "in_progress", "failed"])
+        KYCRequest.status.in_(["pending", "in_progress", "failed", "document_verified", "face_verification_pending"])
     ).update({"status": "cancelled"})
     
     # Reset artist KYC status (only KYC, not bank verification)
@@ -1321,88 +1354,10 @@ async def retry_kyc(
     db.commit()
     
     # Initiate new KYC (reuse start_kyc logic)
-    return await start_kyc(artist_id, current_artist, db)
+    return await start_kyc(artist_id, request, current_artist, db)
 
 
 
-# ============ PROFILE COMPLETION ENDPOINT ============
-
-@router.put("/auth/artist/profile", response_model=ArtistResponse)
-async def complete_artist_profile(
-    request: Request,
-    payload: ArtistProfileCompleteRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Complete artist profile after initial signup
-    Receives Firebase Storage URLs from frontend
-    """
-    try:
-        # Get current artist from Firebase token
-        artist = await get_current_artist(request, db)
-        
-        # Update personal details
-        if payload.name:
-            artist.name = payload.name
-        if payload.username:
-            artist.username = payload.username
-        if payload.phone_number:
-            artist.phone_number = payload.phone_number
-        if payload.birthdate:
-            # Convert DD/MM/YYYY to datetime
-            from datetime import datetime
-            artist.birthdate = datetime.strptime(payload.birthdate, "%d/%m/%Y")
-        if payload.gender:
-            artist.gender = payload.gender
-        if payload.experience:
-            artist.experience = payload.experience
-        if payload.bio:
-            artist.bio = payload.bio
-        
-        # Update file URLs (from Firebase Storage)
-        if payload.profile_pic_url:
-            artist.profile_pic_url = payload.profile_pic_url
-        if payload.certificate_url:
-            artist.certificate_url = payload.certificate_url
-        
-        # Update professional info
-        if payload.how_did_you_learn:
-            artist.how_did_you_learn = payload.how_did_you_learn
-        if payload.profession:
-            artist.profession = payload.profession
-        
-        # Update address
-        if payload.flat_building:
-            artist.flat_building = payload.flat_building
-        if payload.street_area:
-            artist.street_area = payload.street_area
-        if payload.landmark:
-            artist.landmark = payload.landmark
-        if payload.pincode:
-            artist.pincode = payload.pincode
-        if payload.city:
-            artist.city = payload.city
-        if payload.state:
-            artist.state = payload.state
-        if payload.latitude and payload.longitude:
-            artist.latitude = payload.latitude
-            artist.longitude = payload.longitude
-            # Build address string
-            address_parts = [p for p in [payload.flat_building, payload.street_area, payload.landmark, payload.city, payload.state, payload.pincode] if p]
-            artist.address = ", ".join(address_parts)
-            # Update PostGIS geometry
-            artist.location = f"POINT({payload.longitude} {payload.latitude})"
-        # Only mark profile as completed when all steps are done
-        if payload.mark_complete:
-            artist.profile_completed = True
-        
-        db.commit()
-        db.refresh(artist)
-        
-        return artist
-        
-    except Exception as e:
-        db.rollback()
-        print(f"ERROR completing profile: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# NOTE: Duplicate /auth/artist/profile route was here (lines 1336-1417 in original)
+# Removed — the correct handler is defined at line 402 with Depends(get_current_artist)
 
