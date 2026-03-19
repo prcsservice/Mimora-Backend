@@ -1030,7 +1030,7 @@ async def start_face_verification(
 @router.post("/kyc/webhook")
 async def kyc_webhook(
     request: Request,
-    x_meon_signature: str = Header(None),
+    signature: str = Header(None),
     db: Session = Depends(get_db)
 ):
     """
@@ -1064,14 +1064,14 @@ async def kyc_webhook(
     # Signature verification (mandatory in production)
     webhook_secret = os.getenv('MEON_WEBHOOK_SECRET')
     is_production = os.getenv("ENV", "development").lower() == "production"
-    if webhook_secret and x_meon_signature:
+    if webhook_secret and signature:
         expected_signature = hmac.new(
             webhook_secret.encode(),
             raw_body,
             hashlib.sha256
         ).hexdigest()
         
-        if not hmac.compare_digest(expected_signature, x_meon_signature):
+        if not hmac.compare_digest(expected_signature, signature):
             logger.error("Invalid webhook signature")
             raise HTTPException(status_code=403, detail="Invalid webhook signature")
         logger.info("Webhook signature verified successfully")
