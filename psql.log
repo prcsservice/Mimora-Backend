@@ -1,0 +1,11 @@
+               List of relations
+ Schema |       Name        | Type  |  Owner   
+--------+-------------------+-------+----------
+ public | artists           | table | postgres
+ public | customer          | table | postgres
+ public | email_artist_otps | table | postgres
+ public | email_otps        | table | postgres
+ public | kyc_requests      | table | postgres
+ public | spatial_ref_sys   | table | postgres
+(6 rows)
+

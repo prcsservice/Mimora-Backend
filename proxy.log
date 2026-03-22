@@ -1,0 +1,6 @@
+2026/03/20 01:11:14 Authorizing with Application Default Credentials
+2026/03/20 01:11:14 [mimora-490516:asia-south1:mimora] Listening on 127.0.0.1:9470
+2026/03/20 01:11:14 The proxy has started successfully and is ready for new connections!
+2026/03/20 01:11:19 [mimora-490516:asia-south1:mimora] Accepted connection from 127.0.0.1:36712
+2026/03/20 01:11:19 [mimora-490516:asia-south1:mimora] failed to connect to instance: failed to get instance: Refresh error: failed to get instance metadata (connection name = "mimora-490516:asia-south1:mimora"): googleapi: Error 403: boss::NOT_AUTHORIZED: Not authorized to access resource. Possibly missing permission cloudsql.instances.get on resource instances/mimora., forbidden
+2026/03/20 01:11:19 SIGTERM signal received. Shutting down...
