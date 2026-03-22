@@ -1073,7 +1073,6 @@ async def start_face_verification(
 @router.post("/kyc/webhook")
 async def kyc_webhook(
     request: Request,
-    x_meon_signature: str = Header(None, alias="X-Meon-Signature"),
     db: Session = Depends(get_db)
 ):
     """
@@ -1115,9 +1114,11 @@ async def kyc_webhook(
     
     # Signature verification
     # Try multiple header names: X-Meon-Signature (primary), Signature, X-Signature
-    signature = x_meon_signature
-    if not signature:
-        signature = request.headers.get("Signature") or request.headers.get("X-Signature")
+    signature = (
+        request.headers.get("X-Meon-Signature") or
+        request.headers.get("Signature") or
+        request.headers.get("X-Signature")
+    )
     
     webhook_secret = os.getenv('MEON_WEBHOOK_SECRET')
     is_production = os.getenv("ENV", "development").lower() == "production"
