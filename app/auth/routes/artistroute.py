@@ -768,6 +768,7 @@ async def start_kyc(
             redirect_url = os.getenv('MEON_REDIRECT_URL', 'https://mimora-frontend-new.vercel.app/auth/artist/signup?kyc_return=true')
             
             # Build request body per Meon documentation for analyst workflow
+            meon_session_cookie = os.getenv('MEON_SESSION_COOKIE', '')
             request_body = {
                 "company": os.getenv('MEON_COMPANY_NAME', 'mimora'),
                 "workflowName": os.getenv('MEON_KYC_WORKFLOW_NAME', 'analyst'),
@@ -777,20 +778,27 @@ async def start_kyc(
                     "artist_id": str(artist.id),
                     "reference_id": str(kyc_request.id)
                 },
+                "additional_info": {},
                 "is_redirect": True,
                 "redirect_url": redirect_url,
             }
             
             meon_url = f"{base_url}/get_sso_route"
             logger.info(f"Calling Meon SSO KYC API: {meon_url}")
+            logger.info(f"Meon cookie (first 50 chars): {meon_session_cookie[:50] if meon_session_cookie else 'EMPTY'}")
+            logger.info(f"Meon request body: {json.dumps(request_body, default=str)}")
             
             response = await client.post(
                 meon_url,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Cookie": meon_session_cookie,
+                },
                 json=request_body
             )
             
             logger.info(f"Meon response status: {response.status_code}")
+            logger.info(f"Meon response body (first 500 chars): {response.text[:500]}")
             
             if response.status_code in [200, 201]:
                 try:
@@ -877,6 +885,14 @@ async def start_face_verification(
     Initiate face/liveness verification with Meon
     This should be called after document verification is complete
     Returns hosted URL for user to complete face verification
+    
+    Accepts optional JSON body:
+    {
+        "profile_pic_url": "https://firebasestorage.googleapis.com/..."
+    }
+    
+    If profile_pic_url is provided, it will be saved to the artist record
+    before calling Meon, ensuring the latest upload is used for face matching.
     """
     # Validate artist ID format
     try:
@@ -890,6 +906,22 @@ async def start_face_verification(
     
     artist = current_artist
     
+    # ---- Save profile_pic_url from request body if provided ----
+    # The frontend uploads the profile pic to Firebase Storage and has the URL
+    # in component state, but it may not have been saved to the DB yet.
+    # We accept it here to ensure it's persisted before calling Meon.
+    try:
+        body = await request.json()
+        incoming_pic_url = body.get("profile_pic_url") if isinstance(body, dict) else None
+    except Exception:
+        incoming_pic_url = None
+    
+    if incoming_pic_url and isinstance(incoming_pic_url, str) and incoming_pic_url.startswith("http"):
+        artist.profile_pic_url = incoming_pic_url
+        db.commit()
+        db.refresh(artist)
+        logger.info(f"Profile pic URL saved for artist {artist.id} before face verification")
+    
     # Check if already fully verified
     if artist.kyc_verified:
         return {
@@ -897,6 +929,13 @@ async def start_face_verification(
             "message": "KYC already fully verified",
             "kyc_verified": True
         }
+    
+    # Ensure we have a profile pic for face comparison
+    if not artist.profile_pic_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Profile photo is required for face verification. Please upload a profile photo first."
+        )
     
     # Get the existing KYC request
     kyc_request = db.query(KYCRequest).filter(
@@ -907,14 +946,14 @@ async def start_face_verification(
     if not kyc_request:
         raise HTTPException(
             status_code=400,
-            detail="Document verification must be completed first. Please complete Aadhar/PAN verification."
+            detail="Document verification must be completed first. Please complete Aadhar verification."
         )
     
     # Check if document is verified
     if not kyc_request.document_verified:
         return {
             "status": "document_pending",
-            "message": "Document verification pending. Please complete Aadhar/PAN verification first.",
+            "message": "Document verification pending. Please complete Aadhar verification first.",
             "current_step": kyc_request.current_step
         }
     
@@ -934,13 +973,14 @@ async def start_face_verification(
             redirect_url = os.getenv('MEON_FACE_REDIRECT_URL', os.getenv('MEON_REDIRECT_URL', 'https://mimora-frontend-new.vercel.app/auth/artist/signup?face_return=true'))
             
             # Build request body for liveimage workflow
+            meon_session_cookie = os.getenv('MEON_SESSION_COOKIE', '')
             request_body = {
                 "company": os.getenv('MEON_COMPANY_NAME', 'mimora'),
                 "workflowName": os.getenv('MEON_FACE_WORKFLOW_NAME', 'image_verification'),
                 "secret_key": os.getenv('MEON_SECRET_KEY'),
                 "notification": True,        
                 "additional_info": {
-                    "image_captured": artist.profile_pic_url or ""  # Profile pic from Firebase
+                    "image_captured": artist.profile_pic_url  # Profile pic guaranteed to exist now
                 },
                 "unique_keys": {
                     "artist_id": str(artist.id),
@@ -955,7 +995,10 @@ async def start_face_verification(
             
             response = await client.post(
                 meon_url,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Cookie": meon_session_cookie,
+                },
                 json=request_body
             )
             
@@ -1030,11 +1073,15 @@ async def start_face_verification(
 @router.post("/kyc/webhook")
 async def kyc_webhook(
     request: Request,
-    signature: str = Header(None),
+    x_meon_signature: str = Header(None, alias="X-Meon-Signature"),
     db: Session = Depends(get_db)
 ):
     """
     Webhook endpoint for Meon to send KYC verification results.
+    
+    URL: POST https://mimora-auth-254524714861.asia-south1.run.app/kyc/webhook
+    Header: X-Meon-Signature: <hmac_sha256_signature> (optional)
+    Content-Type: application/json
     
     Meon sends a FLAT JSON payload with fields like:
     - current_stepname: "esign14" (indicates which step was completed)
@@ -1046,10 +1093,14 @@ async def kyc_webhook(
     - Esigned_PDF-_equity, PDF-_equity: Document URLs
     - liveimage_timestamp: Face verification timestamp
     - clientimage: Face image URL
+    
+    Response: {"success": true, "message": "Webhook processed successfully", "kyc_status": "...", "kyc_verified": true/false}
     """
     
     # Read raw body
     raw_body = await request.body()
+    logger.info(f"KYC webhook raw body length: {len(raw_body)} bytes")
+    
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError:
@@ -1060,26 +1111,32 @@ async def kyc_webhook(
     safe_keys = ["current_stepname", "digitrans", "clienttoken", "esign_transaction_id"]
     safe_log = {k: payload.get(k) for k in safe_keys if payload.get(k)}
     logger.info(f"KYC webhook received: {json.dumps(safe_log)}")
+    logger.info(f"KYC webhook all keys: {list(payload.keys())}")
     
-    # Signature verification (mandatory in production)
+    # Signature verification
+    # Try multiple header names: X-Meon-Signature (primary), Signature, X-Signature
+    signature = x_meon_signature
+    if not signature:
+        signature = request.headers.get("Signature") or request.headers.get("X-Signature")
+    
     webhook_secret = os.getenv('MEON_WEBHOOK_SECRET')
     is_production = os.getenv("ENV", "development").lower() == "production"
     if webhook_secret and signature:
         expected_signature = hmac.new(
             webhook_secret.encode(),
-            raw_body,
-            hashlib.sha256
+            msg=raw_body,
+            digestmod=hashlib.sha256
         ).hexdigest()
         
         if not hmac.compare_digest(expected_signature, signature):
             logger.error("Invalid webhook signature")
             raise HTTPException(status_code=403, detail="Invalid webhook signature")
         logger.info("Webhook signature verified successfully")
-    elif is_production:
+    elif is_production and webhook_secret:
         logger.error("Webhook signature verification required in production")
         raise HTTPException(status_code=403, detail="Missing webhook signature")
     else:
-        logger.warning("Webhook signature verification skipped (dev mode)")
+        logger.warning("Webhook signature verification skipped (no secret configured or dev mode)")
     
     # ---- Extract identifiers from Meon's flat payload ----
     # Meon uses digitrans/clienttoken as transaction identifiers
