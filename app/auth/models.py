@@ -11,7 +11,7 @@ from sqlalchemy import (
     ARRAY,
     DateTime,
     Text,
-   
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -129,7 +129,12 @@ class Artist(Base):
     # Account Status
     is_active = Column(Boolean, default=True)
     profile_completed = Column(Boolean, default=False, nullable=False)  # Has artist completed full profile?
-    
+
+    # Sprint 1 — Instant Booking & Discovery
+    instant_toggle = Column(Boolean, nullable=False, default=False)
+    artist_type = Column(String(50), nullable=True, default="both")  # "client_only" | "studio_only" | "both"
+    gps_point = Column(Geography(geometry_type='POINT', srid=4326), nullable=True)
+    studio_point = Column(Geography(geometry_type='POINT', srid=4326), nullable=True)
     # Timestamps
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
@@ -141,6 +146,22 @@ class Artist(Base):
     def is_fully_verified(self):
         """Check if artist has completed all verifications"""
         return self.kyc_verified and self.bank_verified
+
+
+# ─────────────── Sprint 2: Customer Discovery ───────────────
+
+class Wishlist(Base):
+    """Customer's wishlist of favorite artists"""
+    __tablename__ = "wishlists"
+    __table_args__ = (
+        UniqueConstraint('customer_id', 'artist_id', name='uq_wishlists_customer_artist'),
+        {'extend_existing': True},
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    customer_id = Column(UUID(as_uuid=True), ForeignKey("customer.id", ondelete="CASCADE"), nullable=False, index=True)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
 class EmailArtistOTP(Base):

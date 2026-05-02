@@ -1,3 +1,4 @@
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.params import Header
 from sqlalchemy.orm import Session
@@ -487,7 +488,70 @@ async def otp_auth(
     return user
 
 
+# ═══════════════════════ Sprint 2: Customer Wishlist ═══════════════════════
 
+@router.post("/customer/wishlist/{artist_id}")
+async def add_to_wishlist(
+    artist_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Add an artist to customer's wishlist."""
+    from app.auth.models import Wishlist
+    existing = db.query(Wishlist).filter(
+        Wishlist.customer_id == current_user.id,
+        Wishlist.artist_id == artist_id
+    ).first()
+    if existing:
+        return {"message": "Already in wishlist"}
+    item = Wishlist(customer_id=current_user.id, artist_id=artist_id)
+    db.add(item)
+    db.commit()
+    return {"message": "Added to wishlist"}
+
+
+@router.delete("/customer/wishlist/{artist_id}")
+async def remove_from_wishlist(
+    artist_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Remove an artist from customer's wishlist."""
+    from app.auth.models import Wishlist
+    db.query(Wishlist).filter(
+        Wishlist.customer_id == current_user.id,
+        Wishlist.artist_id == artist_id
+    ).delete()
+    db.commit()
+    return {"message": "Removed from wishlist"}
+
+
+@router.get("/customer/wishlist")
+async def get_wishlist(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get customer's wishlist with artist details."""
+    from app.auth.models import Wishlist
+    items = db.query(Wishlist).filter(
+        Wishlist.customer_id == current_user.id
+    ).all()
+    artist_ids = [item.artist_id for item in items]
+    if not artist_ids:
+        return {"wishlist": []}
+    artists = db.query(Artist).filter(Artist.id.in_(artist_ids)).all()
+    return {"wishlist": [
+        {
+            "id": str(a.id),
+            "name": a.name,
+            "profile_pic_url": a.profile_pic_url,
+            "profession": a.profession,
+            "rating": float(a.rating) if a.rating else 0.0,
+            "city": a.city,
+            "kyc_verified": a.kyc_verified,
+        }
+        for a in artists
+    ]}
 
 
 

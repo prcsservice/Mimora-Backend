@@ -1,10 +1,8 @@
 """
 Mimora Booking Microservice — FastAPI App
 """
-import asyncio
 import threading
 import logging
-import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -16,8 +14,7 @@ import httpx
 
 from app.Booking.database import Base, engine
 from app.Booking.routes import router as booking_router
-from app.Booking.services.redis_client import close_redis, start_expiry_listener
-from app.Booking.services.booking_service import handle_booking_expiry
+from app.Booking.services.redis_client import close_redis
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -78,21 +75,9 @@ async def on_startup():
 
     threading.Thread(target=create_tables, daemon=True).start()
 
-    # Start Redis expiry listener in background
-    try:
-        asyncio.create_task(_start_redis_listener())
-        logger.info("Redis expiry listener task scheduled")
-    except Exception as e:
-        logger.warning(f"Redis listener not started (Redis may not be available): {e}")
-
-
-async def _start_redis_listener():
-    """Start the Redis keyspace notification listener."""
-    try:
-        await start_expiry_listener(handle_booking_expiry)
-    except Exception as e:
-        logger.warning(f"Redis expiry listener failed: {e}")
-        logger.warning("Booking timer expiry won't trigger automatic fallback. Ensure Redis is running.")
+    # Redis keyspace listener is owned by app.auth.main in the current
+    # monolith deployment. Do NOT start it here or expiry events will be
+    # processed twice (duplicate DB writes + duplicate WS fan-out).
 
 
 @app.on_event("shutdown")
@@ -115,6 +100,8 @@ def health():
 
 # ─────────────── Reverse Geocoding Proxy ───────────────
 
+# TODO: Remove this duplicate /geocode/reverse endpoint when deploying Booking service separately.
+# The same endpoint already exists in app/auth/main.py.
 @app.get("/geocode/reverse")
 @limiter.limit("30/minute")
 async def reverse_geocode(request: Request, lat: float, lon: float):

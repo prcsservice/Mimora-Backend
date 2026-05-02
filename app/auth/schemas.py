@@ -240,3 +240,17 @@ class ArtistResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ═══════════════════════ Instant Toggle (Sprint 1) ═══════════════════════
+
+class InstantToggleRequest(BaseModel):
+    enabled: bool
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+
+class InstantToggleResponse(BaseModel):
+    instant_toggle: bool
+    booking_mode: Optional[str] = None
+    message: str

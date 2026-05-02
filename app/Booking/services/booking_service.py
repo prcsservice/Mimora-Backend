@@ -22,6 +22,11 @@ from app.Booking.services.ws_manager import ws_manager
 logger = logging.getLogger(__name__)
 
 
+def _utcnow() -> datetime.datetime:
+    """Naive UTC datetime — replacement for the deprecated datetime.utcnow()."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
 # ═══════════════════════ Artist Packages ═══════════════════════
 
 def create_artist_package(db: Session, artist_id: UUID, data: dict) -> ArtistPackage:
@@ -33,6 +38,9 @@ def create_artist_package(db: Session, artist_id: UUID, data: dict) -> ArtistPac
         price=data["price"],
         duration_minutes=data.get("duration_minutes"),
         category=data.get("category"),
+        service_type=data.get("service_type"),
+        image_url=data.get("image_url"),
+        module=data.get("module", "instant"),
     )
     db.add(package)
     db.commit()
@@ -112,6 +120,11 @@ async def create_instant_booking(
     if artist.booking_mode not in ("instant", "both"):
         raise ValueError("Artist does not accept instant bookings")
 
+    # Sprint 2 — instant_toggle must be ON. The artist may have flipped it off
+    # since the customer loaded the search results.
+    if not getattr(artist, "instant_toggle", False):
+        raise ValueError("Artist is not currently accepting instant bookings")
+
     # 2. Validate packages
     packages = (
         db.query(ArtistPackage)
@@ -138,7 +151,13 @@ async def create_instant_booking(
     grand_total = total_amount + travel_charge
 
     # Expiry time
-    expires_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=BOOKING_TIMER_TTL)
+    expires_at = _utcnow() + datetime.timedelta(seconds=BOOKING_TIMER_TTL)
+
+    # Snapshot customer contact at booking time so artist can call without an extra
+    # join, and so the data persists if the customer later edits their profile.
+    customer = db.query(User).filter(User.id == customer_id).first()
+    customer_name = customer.name if customer else None
+    customer_phone = customer.phone_number if customer else None
 
     # Create booking
     booking = Booking(
@@ -152,6 +171,8 @@ async def create_instant_booking(
         customer_lat=customer_lat,
         customer_lng=customer_lng,
         customer_address=customer_address,
+        customer_name=customer_name,
+        customer_phone=customer_phone,
         artist_lat=artist_lat,
         artist_lng=artist_lng,
         distance_km=distance_km,
@@ -223,7 +244,7 @@ async def artist_respond(
     if not timer_active:
         raise ValueError("Booking accept window has expired")
 
-    now = datetime.datetime.utcnow()
+    now = _utcnow()
 
     if action == "accept":
         booking.status = "accepted"
@@ -280,7 +301,7 @@ async def handle_booking_expiry(booking_id: str):
             return
 
         booking.status = "expired"
-        booking.declined_at = datetime.datetime.utcnow()
+        booking.declined_at = _utcnow()
 
         # Notify customer
         await ws_manager.notify_customer(str(booking.customer_id), {
@@ -350,7 +371,7 @@ async def _advance_to_next_artist(db: Session, booking: Booking):
     )
     travel_charge = calculate_travel_charge(distance_km)
     grand_total = float(booking.total_amount) + travel_charge
-    expires_at = datetime.datetime.utcnow() + datetime.timedelta(seconds=BOOKING_TIMER_TTL)
+    expires_at = _utcnow() + datetime.timedelta(seconds=BOOKING_TIMER_TTL)
 
     # Create new booking for the fallback artist
     new_booking = Booking(
@@ -448,3 +469,31 @@ def get_artist_bookings(db: Session, artist_id: UUID, status: Optional[str] = No
     if status:
         query = query.filter(Booking.status == status)
     return query.order_by(Booking.created_at.desc()).offset(offset).limit(limit).all()
+
+
+def get_active_booking_for_artist(db: Session, artist_id: UUID) -> Optional[Booking]:
+    """The artist's most recent non-terminal booking — used by the FE popup
+    to recover state after a refresh. Returns None when nothing's active."""
+    return (
+        db.query(Booking)
+        .filter(
+            Booking.artist_id == artist_id,
+            Booking.status.in_(("pending", "accepted")),
+        )
+        .order_by(Booking.created_at.desc())
+        .first()
+    )
+
+
+def get_active_booking_for_customer(db: Session, customer_id: UUID) -> Optional[Booking]:
+    """The customer's most recent non-terminal booking — symmetric helper for
+    the customer-side waiting page."""
+    return (
+        db.query(Booking)
+        .filter(
+            Booking.customer_id == customer_id,
+            Booking.status.in_(("pending", "accepted")),
+        )
+        .order_by(Booking.created_at.desc())
+        .first()
+    )

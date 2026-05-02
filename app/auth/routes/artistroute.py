@@ -23,7 +23,8 @@ from app.auth.schemas import (
     ArtistCreate, ArtistResponse, UserLocationUpdate,
     ArtistOAuthRequest, EmailSignupRequest, EmailLoginRequest,
     CheckUserRequest, ArtistVerifyOTPRequest, OTPRequest,
-    ArtistProfileCompleteRequest,EmailArtistOTPRequest
+    ArtistProfileCompleteRequest, EmailArtistOTPRequest,
+    InstantToggleRequest,
 )
 from app.auth.firebase import verify_firebase_token
 from app.auth.utils.otp import generate_otp, hash_otp, verify_otp, otp_expiry
@@ -58,7 +59,7 @@ async def get_artist_profile(artist: Artist = Depends(get_current_artist)):
     return artist
 
 
-@router.put("/auth/artist/location")
+@router.put("/auth/artist/location", response_model=ArtistResponse)
 async def update_artist_location(
     payload: UserLocationUpdate,
     current_artist: Artist = Depends(get_current_artist),
@@ -1419,3 +1420,129 @@ async def retry_kyc(
 # NOTE: Duplicate /auth/artist/profile route was here (lines 1336-1417 in original)
 # Removed — the correct handler is defined at line 402 with Depends(get_current_artist)
 
+
+# ═══════════════════════ Sprint 1 — Instant Toggle & Dashboard ═══════════════════════
+
+@router.patch("/auth/artist/instant-toggle")
+async def update_instant_toggle(
+    data: "InstantToggleRequest",
+    current_artist: Artist = Depends(get_current_artist),
+    db: Session = Depends(get_db),
+):
+    """
+    Enable/disable instant booking toggle.
+    When enabled with lat/lng: updates booking_mode, latitude, longitude, and PostGIS gps_point.
+    Toggle state persists in DB — never reset by logout or token expiry.
+    """
+    from app.auth.schemas import InstantToggleRequest  # lazy import for type
+    from sqlalchemy import text
+
+    artist = db.query(Artist).filter(Artist.id == current_artist.id).first()
+
+    # Update the instant_toggle column (new) and booking_mode (existing)
+    artist.instant_toggle = data.enabled
+    if data.enabled:
+        artist.booking_mode = "instant"  # existing column — set to instant when toggle ON
+
+    if data.enabled and data.lat is not None and data.lng is not None:
+        artist.latitude = data.lat          # existing column
+        artist.longitude = data.lng         # existing column
+        # Update PostGIS gps_point (new column)
+        db.execute(
+            text("UPDATE artists SET gps_point = ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) WHERE id = :id"),
+            {"lng": data.lng, "lat": data.lat, "id": str(artist.id)},
+        )
+
+    db.commit()
+
+    return {
+        "instant_toggle": artist.instant_toggle,
+        "booking_mode": artist.booking_mode,
+        "message": "Instant booking enabled" if data.enabled else "Instant booking disabled",
+    }
+
+
+@router.get("/auth/artist/dashboard")
+async def get_artist_dashboard(
+    current_artist: Artist = Depends(get_current_artist),
+    db: Session = Depends(get_db),
+):
+    """
+    Summary data for artist home dashboard.
+    Gracefully returns zeros for tables that may not have data yet.
+    """
+    from datetime import datetime as dt, timezone, timedelta
+
+    now = dt.now(timezone.utc)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=today_start.weekday())
+
+    result = {
+        "instant_toggle": current_artist.instant_toggle if hasattr(current_artist, "instant_toggle") else False,
+        "booking_mode": current_artist.booking_mode,
+        "active_request_count": 0,
+        "upcoming_booking": None,
+        "today_earnings": 0.0,
+        "completed_today": 0,
+        "weekly_bookings": 0,
+        "weekly_earnings": 0.0,
+        "weekly_requests": 0,
+    }
+
+    try:
+        # Import booking models lazily — avoids circular import issues
+        from app.Booking.models import Booking
+        from sqlalchemy import func
+
+        # Active requests (pending bookings for this artist)
+        result["active_request_count"] = db.query(Booking).filter(
+            Booking.artist_id == current_artist.id,
+            Booking.status == "pending",
+        ).count()
+
+        # Next upcoming confirmed booking
+        upcoming = db.query(Booking).filter(
+            Booking.artist_id == current_artist.id,
+            Booking.status == "accepted",
+        ).order_by(Booking.created_at.asc()).first()
+        if upcoming:
+            result["upcoming_booking"] = {
+                "id": str(upcoming.id),
+                "status": upcoming.status,
+                "created_at": str(upcoming.created_at),
+                "grand_total": float(upcoming.grand_total),
+            }
+
+        # Today's earnings (completed bookings)
+        today_earn = db.query(func.sum(Booking.grand_total)).filter(
+            Booking.artist_id == current_artist.id,
+            Booking.status == "completed",
+            Booking.completed_at >= today_start,
+        ).scalar()
+        result["today_earnings"] = float(today_earn or 0)
+
+        result["completed_today"] = db.query(Booking).filter(
+            Booking.artist_id == current_artist.id,
+            Booking.status == "completed",
+            Booking.completed_at >= today_start,
+        ).count()
+
+        result["weekly_bookings"] = db.query(Booking).filter(
+            Booking.artist_id == current_artist.id,
+            Booking.created_at >= week_start,
+        ).count()
+
+        weekly_earn = db.query(func.sum(Booking.grand_total)).filter(
+            Booking.artist_id == current_artist.id,
+            Booking.status == "completed",
+            Booking.completed_at >= week_start,
+        ).scalar()
+        result["weekly_earnings"] = float(weekly_earn or 0)
+
+        result["weekly_requests"] = result["weekly_bookings"]  # same for now
+
+    except Exception as e:
+        # Tables exist but query failed — return zeros, log error
+        logger.warning(f"Dashboard query error (non-critical): {e}")
+
+    return result

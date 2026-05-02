@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from app.auth.database import Base, engine
 from app.auth.routes import router as auth_router, artist_router
+from app.Booking.routes import router as booking_router
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -59,8 +60,36 @@ def on_startup():
     
     threading.Thread(target=create_tables, daemon=True).start()
 
+    # Seed package templates (idempotent — skips if already seeded)
+    def seed():
+        try:
+            from app.Booking.seeds.package_templates import seed_templates
+            seed_templates()
+            print("Package templates seeded successfully")
+        except Exception as e:
+            print(f"Template seeding skipped or failed: {e}")
+
+    threading.Thread(target=seed, daemon=True).start()
+
+    # Start Redis expiry listener for booking timers
+    import asyncio
+    async def _start_redis():
+        try:
+            from app.Booking.services.redis_client import start_expiry_listener
+            from app.Booking.services.booking_service import handle_booking_expiry
+            await start_expiry_listener(handle_booking_expiry)
+        except Exception as e:
+            print(f"Redis expiry listener not started (Redis may not be running): {e}")
+
+    try:
+        asyncio.create_task(_start_redis())
+        print("Redis expiry listener task scheduled")
+    except Exception as e:
+        print(f"Could not schedule Redis listener: {e}")
+
 app.include_router(auth_router)
 app.include_router(artist_router)
+app.include_router(booking_router)
 
 
 # ============ Reverse Geocoding Proxy ============

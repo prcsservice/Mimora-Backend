@@ -27,7 +27,7 @@ class ArtistPackage(Base):
     __tablename__ = "artist_packages"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id"), nullable=False, index=True)
+    artist_id = Column(UUID(as_uuid=True), ForeignKey("artists.id"), nullable=True, index=True)
 
     name = Column(String, nullable=False)              # "Bridal HD Makeup"
     description = Column(Text, nullable=True)
@@ -35,6 +35,12 @@ class ArtistPackage(Base):
     duration_minutes = Column(Integer, nullable=True)   # Approx time in mins
     category = Column(String, nullable=True)            # "bridal" | "party" | "editorial"
     is_active = Column(Boolean, default=True)
+
+    # Sprint 1 — new columns
+    is_template = Column(Boolean, nullable=False, default=False)
+    module = Column(String(50), nullable=False, default="instant")  # "instant" | "flexi" | "workshop"
+    image_url = Column(String(500), nullable=True)
+    service_type = Column(String(100), nullable=True)  # "makeup" | "nail" | "hairstyle" | "mehendi" | "saree_draping" | "saree_pleating"
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
@@ -86,6 +92,15 @@ class Booking(Base):
 
     # Notes
     customer_notes = Column(Text, nullable=True)
+
+    # Sprint 3 — customer contact snapshot at create time. Lets the artist see
+    # who's calling without joining customer table, and survives later edits.
+    customer_name = Column(String, nullable=True)
+    customer_phone = Column(String, nullable=True)
+
+    # Sprint 3 — cancellation
+    cancelled_by = Column(String(20), nullable=True)        # "customer" | "artist"
+    cancellation_reason = Column(Text, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
